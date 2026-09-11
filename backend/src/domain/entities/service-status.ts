@@ -104,7 +104,7 @@ export interface ServiceStatus {
   memoryPercent: number | null;
   lastChecked: string;
   // 'systemd' = found via systemctl, 'docker' = found via docker, 'direct' = TCP ping
-  source?: 'systemd' | 'docker' | 'direct';
+  source?: 'systemd' | 'docker' | 'direct' | 'kubernetes';
 }
 
 export interface ServiceStatusMap {

@@ -1,6 +1,7 @@
 import pino from 'pino';
 import * as net from 'net';
 import { IHostExecutor } from '../../domain/interfaces/host-executor';
+import { IServiceRuntime } from '../../domain/interfaces/service-runtime';
 import { IWebSocketBroadcaster } from '../../domain/interfaces/websocket-broadcaster';
 import { IAuditLogger } from '../../domain/interfaces/audit-logger';
 import { ServiceStatus, ServiceName, SERVICE_UNIT_MAP, SERVICE_RESTART_ORDER } from '../../domain/entities/service-status';
@@ -15,6 +16,7 @@ export class ServiceMonitorUseCase {
     private readonly wsBroadcaster: IWebSocketBroadcaster,
     private readonly auditLogger: IAuditLogger,
     private readonly logger: pino.Logger,
+    private readonly serviceRuntime?: IServiceRuntime,
   ) {}
 
   async getAll(): Promise<ServiceStatusDto[]> {
@@ -32,6 +34,31 @@ export class ServiceMonitorUseCase {
   }
 
   async executeAction(dto: ServiceActionDto): Promise<{ success: boolean; message: string }> {
+    // Kubernetes integration is intentionally read-only for now.
+    // Never fall through to systemctl for Kubernetes-managed Open5GS services.
+    if (this.serviceRuntime?.handles(dto.service)) {
+      const message =
+        `Action '${dto.action}' is disabled for Kubernetes-managed service '${dto.service}' (read-only mode)`;
+
+      this.logger.warn(
+        { service: dto.service, action: dto.action },
+        'Blocked Kubernetes service action in read-only mode',
+      );
+
+      await this.auditLogger.log({
+        action: `service_${dto.action}` as any,
+        user: 'admin',
+        target: dto.service,
+        details: message,
+        success: false,
+      });
+
+      return {
+        success: false,
+        message,
+      };
+    }
+
     const unitName = SERVICE_UNIT_MAP[dto.service];
     this.logger.info({ service: dto.service, action: dto.action }, 'Executing service action');
 
@@ -206,6 +233,15 @@ export class ServiceMonitorUseCase {
   private static MONGO_LOG_INTERVAL_MS = 30 * 1000; // 30 seconds
 
   private async getServiceStatus(name: ServiceName, unitName: string): Promise<ServiceStatusDto> {
+    if (this.serviceRuntime?.handles(name)) {
+      const runtimeStatus = await this.serviceRuntime.getServiceStatus(name);
+
+      if (runtimeStatus) {
+        this.statusCache[name] = runtimeStatus;
+        return runtimeStatus;
+      }
+    }
+
     // MongoDB special case: check Docker/TCP FIRST if systemctl says inactive
     // This handles users who run MongoDB in Docker instead of as a systemd service.
     if (name === 'mongodb') {

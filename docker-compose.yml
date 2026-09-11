@@ -53,6 +53,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/ue-validation:/tmp/ue-validation
       - ./monitoring:/app/monitoring
+      - ${KUBECONFIG_HOST_PATH:-/root/open5gs-nms-kubeconfig}:/etc/open5gs-nms/kubeconfig:ro
       # UE Validation's 4G srsRAN image is built locally (no public image
       # exists) — this is the build context validation-controller.ts uses.
       - ./srsran4g:/app/srsran4g:ro
@@ -62,8 +63,11 @@ services:
     environment:
       - TZ=${TZ:-America/New_York}
       - NODE_ENV=production
+      - OPEN5GS_RUNTIME=kubernetes
+      - KUBECONFIG=/etc/open5gs-nms/kubeconfig
+      - K8S_NAMESPACE=default
       - PORT=3001
-      - MONGODB_URI=mongodb://127.0.0.1:27017/open5gs
+      - MONGODB_URI=${MONGODB_URI}
       - BACKUP_PATH=/etc/open5gs/backups/config
       - MONGO_BACKUP_PATH=/etc/open5gs/backups/mongodb
       - LOG_LEVEL=info

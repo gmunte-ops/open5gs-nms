@@ -6,6 +6,7 @@ import { WebSocketServer } from 'ws';
 import pino from 'pino';
 import { loadAppConfig } from './config';
 import { LocalHostExecutor } from './infrastructure/system/local-host-executor';
+import { KubernetesServiceRuntime } from './infrastructure/kubernetes/kubernetes-service-runtime';
 import { YamlConfigRepository } from './infrastructure/yaml/yaml-config-repository';
 import { MongoSubscriberRepository } from './infrastructure/mongodb/mongo-subscriber-repository';
 import { FileAuditLogger } from './infrastructure/logging/file-audit-logger';
@@ -148,6 +149,22 @@ async function main() {
 
   // Initialize infrastructure components
   const hostExecutor = new LocalHostExecutor(logger, config.systemctlPath);
+
+  const serviceRuntime =
+    process.env.OPEN5GS_RUNTIME === 'kubernetes'
+      ? new KubernetesServiceRuntime(
+          process.env.KUBECONFIG || '/etc/open5gs-nms/kubeconfig',
+          process.env.K8S_NAMESPACE || 'default',
+          logger,
+        )
+      : undefined;
+
+  if (serviceRuntime) {
+    logger.info(
+      { namespace: process.env.K8S_NAMESPACE || 'default' },
+      'Kubernetes Open5GS service runtime enabled',
+    );
+  }
   const configRepo = new YamlConfigRepository(hostExecutor, config.configPath, logger);
   const subscriberRepo = new MongoSubscriberRepository(config.mongodbUri, logger);
   const rfPlanningProjectRepo = new MongoRfPlanningProjectRepository(config.mongodbUri, logger);
@@ -310,6 +327,7 @@ async function main() {
     wsBroadcaster,
     auditLogger,
     logger,
+    serviceRuntime,
   );
   const tunUseCase = new TunManagementUseCase(hostExecutor, logger, configRepo);
   const subscriberManagementUseCase = new SubscriberManagementUseCase(

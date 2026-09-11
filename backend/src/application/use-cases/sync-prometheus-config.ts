@@ -52,6 +52,7 @@ export class SyncPrometheusConfigUseCase {
         const t = targets[key];
         return [
           `  - job_name: open5gs-${label}`,
+          `    fallback_scrape_protocol: PrometheusText0.0.4`,
           `    static_configs:`,
           `      - targets: ['${t.address}:${t.port}']`,
           `        labels:`,

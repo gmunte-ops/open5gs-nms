@@ -28,6 +28,7 @@
     ]
   },
   "dependencies": {
+    "@kubernetes/client-node": "^2.0.0",
     "async-mutex": "^0.4.1",
     "better-sqlite3": "^12.9.0",
     "compression": "^1.7.4",

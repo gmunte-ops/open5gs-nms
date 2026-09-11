@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim AS builder
 
 # Build tools needed to compile better-sqlite3 native bindings
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,7 +17,7 @@ RUN npx tsc
 # Prune dev dependencies after build - leaves prod deps including compiled better-sqlite3
 RUN npm prune --omit=dev
 
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 # Runtime deps: nsenter, iproute2 (ip command), Docker CLI, MongoDB tools, tshark, Python3 (for suci-keytool)
 RUN apt-get update && apt-get install -y --no-install-recommends \
