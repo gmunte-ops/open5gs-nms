@@ -3,6 +3,7 @@ import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import pino from 'pino';
 import { IHostExecutor } from '../../domain/interfaces/host-executor';
+import { LogStreamingUseCase } from '../../application/use-cases/log-streaming';
 import { AppConfig } from '../../config';
 import { requireAdmin } from './middleware/auth-middleware';
 import * as fs from 'fs/promises';
@@ -54,6 +55,7 @@ export const createLogDownloadRouter = (
   hostExecutor: IHostExecutor,
   appConfig: AppConfig,
   logger: pino.Logger,
+  logStreamingUseCase: LogStreamingUseCase,
 ): Router => {
   const router = Router();
 
@@ -136,7 +138,7 @@ export const createLogDownloadRouter = (
 
         if (source === 'open5gs') {
           // Direct read — /var/log/open5gs is mounted into the container
-          content = await readLog(`${LOG_BASE}/${service}.log`, range);
+          content = await logStreamingUseCase.readText(service, range);
         } else if (source === 'genieacs') {
           // Direct read — /var/log/genieacs is mounted into the container
           content = await readLog(`${GENIEACS_LOG_BASE}/${service}.log`, range);

@@ -1,6 +1,10 @@
+import { useServiceCapabilities } from '../../hooks/useServiceCapabilities';
+import { actionView, bulkActionView, type CapabilityLoad, type CapabilityView } from './capability-view';
+import { ServiceCapabilities, CapabilityActionButton } from './ServiceCapabilities';
 import { useState, useEffect } from 'react';
+import { KubernetesWorkloadDetails } from './KubernetesWorkloadDetails';
 import {
-  Play, Square, RotateCw, Zap, Radio, Wifi, Container, AlertCircle,
+  Play, Square, RotateCw, Zap, Radio, Wifi, AlertCircle,
   Power, PowerOff, Gauge, Settings2,
 } from 'lucide-react';
 import { useServiceStore } from '../../stores';
@@ -70,6 +74,10 @@ function serviceManageTarget(name: string): { label: string; target: string } {
 interface RowBadge { label: string; icon?: React.ReactNode; color: string }
 
 interface ServiceRowData {
+  capabilities?: CapabilityLoad;
+  actionsSupported?: boolean;
+  actionViews?: Record<string, CapabilityView>;
+  workload?: ServiceStatus['kubernetes'];
   key: string;
   name: string;
   unitName?: string;
@@ -112,6 +120,8 @@ function ServiceRow({ row }: { row: ServiceRowData }): JSX.Element {
             </div>
             {row.unitName && <p className="text-xs text-nms-text-dim font-mono truncate">{row.unitName}</p>}
             {row.subtitle && <p className="text-xs text-nms-text-dim truncate">{row.subtitle}</p>}
+            {row.workload && <KubernetesWorkloadDetails workload={row.workload} />}
+            {row.capabilities && <ServiceCapabilities load={row.capabilities} actionsSupported={row.actionsSupported} />}
           </div>
         </div>
       </td>
@@ -131,9 +141,9 @@ function ServiceRow({ row }: { row: ServiceRowData }): JSX.Element {
         {row.enabled !== undefined ? (
           <button
             onClick={row.onToggleEnabled}
-            disabled={row.acting}
+            disabled={row.acting || row.actionViews?.boot.disabled}
             className={clsx('p-1 rounded-full', row.enabled ? 'bg-nms-accent/10 text-nms-accent' : 'bg-gray-500/10 text-gray-500')}
-            title={row.enabled ? 'Disable at boot' : 'Enable at boot'}
+            title={`${row.enabled ? 'Disable at boot' : 'Enable at boot'}${row.actionViews ? `: ${row.actionViews.boot.label}. ${row.actionViews.boot.reason}` : ''}`}
           >
             {row.enabled ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
           </button>
@@ -142,19 +152,19 @@ function ServiceRow({ row }: { row: ServiceRowData }): JSX.Element {
       <td className="px-3 py-2.5">
         <div className="flex items-center justify-end gap-1.5 flex-wrap">
           {row.onStart && (
-            <button onClick={row.onStart} disabled={row.acting || active} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1">
+            <CapabilityActionButton label="Start" view={row.actionViews?.start} onClick={row.onStart} disabled={row.acting || active} disabledReason={row.acting ? 'Action in progress.' : 'Service is already running.'} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1">
               <Play className="w-3 h-3" /> Start
-            </button>
+            </CapabilityActionButton>
           )}
           {row.onStop && (
-            <button onClick={row.onStop} disabled={row.acting || !active} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1 text-red-400">
+            <CapabilityActionButton label="Stop" view={row.actionViews?.stop} onClick={row.onStop} disabled={row.acting || !active} disabledReason={row.acting ? 'Action in progress.' : 'Service is not running.'} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1 text-red-400">
               <Square className="w-3 h-3" /> Stop
-            </button>
+            </CapabilityActionButton>
           )}
           {row.onRestart && (
-            <button onClick={row.onRestart} disabled={row.acting} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1">
+            <CapabilityActionButton label="Restart" view={row.actionViews?.restart} onClick={row.onRestart} disabled={row.acting} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1">
               <RotateCw className="w-3 h-3" /> Restart
-            </button>
+            </CapabilityActionButton>
           )}
           {row.extraAction && (
             <button onClick={row.extraAction.onClick} className="nms-btn-ghost text-xs flex items-center gap-1 px-2 py-1" title={row.extraAction.label}>
@@ -214,6 +224,7 @@ interface SnmpServiceStatus { installed: boolean; active: boolean; enabled: bool
 export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => void }): JSX.Element {
   const statuses = useServiceStore((s) => s.statuses);
   const fetchStatuses = useServiceStore((s) => s.fetchStatuses);
+  const capabilities = useServiceCapabilities(statuses.map(s => s.name));
   const [bulkActing, setBulkActing] = useState(false);
   const [acting4G, setActing4G] = useState(false);
   const [acting5G, setActing5G] = useState(false);
@@ -301,8 +312,17 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
   // Derive running state for 4G and 5G groups
   const is5GAnyRunning = statuses.some(s => SERVICES_5G.includes(s.name) && s.active);
   const is4GAnyRunning = statuses.some(s => SERVICES_4G.includes(s.name) && s.active);
+  const coreReadOnly = statuses.some(s => s.actionsSupported === false);
+  const bulkView = (action: 'start' | 'stop' | 'restart', names?: string[]): CapabilityView => {
+    const view = bulkActionView(names ? statuses.filter(s => names.includes(s.name)) : statuses, capabilities.services, action);
+    return coreReadOnly && !view.disabled
+      ? { disabled: true, label: 'Unavailable', reason: 'One or more services report lifecycle actions as unsupported.' }
+      : view;
+  };
 
   const doBulkAction = async (action: 'start' | 'stop' | 'restart'): Promise<void> => {
+    const assessment = bulkView(action);
+    if (coreReadOnly || assessment.disabled) { toast.error(assessment.reason); return; }
     if (!confirm(`Are you sure you want to ${action} ALL services?`)) return;
     setBulkActing(true);
     try {
@@ -319,6 +339,8 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
     const anyRunning = group === '5g' ? is5GAnyRunning : is4GAnyRunning;
     const action = anyRunning ? 'stop' : 'start';
     const label = group.toUpperCase();
+    const assessment = bulkView(action, services);
+    if (coreReadOnly || assessment.disabled) { toast.error(assessment.reason); return; }
 
     if (!confirm(`${anyRunning ? 'Stop' : 'Start'} all ${label} services?`)) return;
 
@@ -338,6 +360,8 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
   };
 
   const doServiceAction = async (name: string, action: 'start' | 'stop' | 'restart' | 'enable' | 'disable'): Promise<void> => {
+    const assessment = actionView(capabilities.services[name], action, statuses.find(s => s.name === name)?.actionsSupported);
+    if (assessment.disabled) { toast.error(assessment.reason); return; }
     setActingByName(a => ({ ...a, [name]: true }));
     try {
       const result = await serviceApi.action(name, action);
@@ -359,11 +383,20 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
   // is actually configured.
   const serviceRow = (s: ServiceStatus): ServiceRowData => {
     const { label, target } = serviceManageTarget(s.name);
+    const readOnly = s.actionsSupported === false;
+    const load = capabilities.services[s.name] ?? { status: 'loading' as const };
+    const views = { start: actionView(load, 'start', s.actionsSupported), stop: actionView(load, 'stop', s.actionsSupported),
+      restart: actionView(load, 'restart', s.actionsSupported), boot: actionView(load, s.enabled ? 'disable' : 'enable', s.actionsSupported) };
     return {
       key: s.name,
+      capabilities: load,
+      actionsSupported: s.actionsSupported,
+      actionViews: views,
+      workload: s.kubernetes,
       name: s.name.toUpperCase(),
       unitName: s.unitName,
-      badge: s.source === 'docker' ? { label: 'docker', icon: <Container className="w-2.5 h-2.5" />, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' } : undefined,
+      badge: s.source ? { label: s.source, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' } : undefined,
+      subtitle: views.restart.disabled ? `${views.restart.label}: ${views.restart.reason}` : undefined,
       active: s.active,
       stateLabel: `${s.state}/${s.subState}`,
       enabled: s.enabled,
@@ -377,7 +410,7 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
       onStop: () => doServiceAction(s.name, 'stop'),
       onRestart: () => doServiceAction(s.name, 'restart'),
       manageLabel: label,
-      onManage: () => onNavigate?.(target),
+      onManage: readOnly ? undefined : () => onNavigate?.(target),
     };
   };
 
@@ -472,14 +505,14 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
           {/* 5G group toggle */}
           <button
             onClick={() => doGroupToggle('5g')}
-            disabled={acting5G || bulkActing}
+            disabled={coreReadOnly || bulkView(is5GAnyRunning ? 'stop' : 'start', SERVICES_5G).disabled || statuses.length === 0 || acting5G || bulkActing}
             className={clsx(
               'flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg border transition-all',
               is5GAnyRunning
                 ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 hover:bg-blue-500/20'
                 : 'bg-nms-surface-2 text-nms-text-dim border-nms-border hover:text-nms-text',
             )}
-            title={is5GAnyRunning ? 'Stop all 5G services' : 'Start all 5G services'}
+            title={bulkView(is5GAnyRunning ? 'stop' : 'start', SERVICES_5G).reason}
           >
             <Wifi className="w-4 h-4" />
             {acting5G ? '...' : is5GAnyRunning ? 'Stop 5G' : 'Start 5G'}
@@ -488,14 +521,14 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
           {/* 4G group toggle */}
           <button
             onClick={() => doGroupToggle('4g')}
-            disabled={acting4G || bulkActing}
+            disabled={coreReadOnly || bulkView(is4GAnyRunning ? 'stop' : 'start', SERVICES_4G).disabled || statuses.length === 0 || acting4G || bulkActing}
             className={clsx(
               'flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg border transition-all',
               is4GAnyRunning
                 ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'
                 : 'bg-nms-surface-2 text-nms-text-dim border-nms-border hover:text-nms-text',
             )}
-            title={is4GAnyRunning ? 'Stop all 4G services' : 'Start all 4G services'}
+            title={bulkView(is4GAnyRunning ? 'stop' : 'start', SERVICES_4G).reason}
           >
             <Radio className="w-4 h-4" />
             {acting4G ? '...' : is4GAnyRunning ? 'Stop 4G' : 'Start 4G'}
@@ -505,26 +538,34 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
 
           <button
             onClick={() => doBulkAction('start')}
-            disabled={bulkActing}
+            title={bulkView('start').reason}
+            disabled={coreReadOnly || bulkView('start').disabled || statuses.length === 0 || bulkActing}
             className="nms-btn-ghost flex items-center gap-2"
           >
             <Play className="w-4 h-4" /> Start All
           </button>
           <button
             onClick={() => doBulkAction('stop')}
-            disabled={bulkActing}
+            title={bulkView('stop').reason}
+            disabled={coreReadOnly || bulkView('stop').disabled || statuses.length === 0 || bulkActing}
             className="nms-btn-danger flex items-center gap-2"
           >
             <Square className="w-4 h-4" /> Stop All
           </button>
           <button
             onClick={() => doBulkAction('restart')}
-            disabled={bulkActing}
+            title={bulkView('restart').reason}
+            disabled={coreReadOnly || bulkView('restart').disabled || statuses.length === 0 || bulkActing}
             className="nms-btn-primary flex items-center gap-2"
           >
             <Zap className="w-4 h-4" /> Restart All
           </button>
         </div>
+      </div>
+
+      <div className="flex items-start justify-between gap-4">
+        <ServiceCapabilities load={capabilities.target} />
+        <button className="nms-btn-ghost text-xs" onClick={capabilities.refresh}>Refresh capabilities</button>
       </div>
 
       {/* Loading skeleton */}

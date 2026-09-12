@@ -5,6 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
+    "test:services": "node --test tests/service-capabilities.test.cjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

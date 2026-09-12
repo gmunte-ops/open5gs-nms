@@ -1,0 +1,295 @@
+import pino from 'pino';
+import { readFile } from 'fs/promises';
+import { spawn } from 'child_process';
+import { IHostExecutor } from '../../domain/interfaces/host-executor';
+import { MAJOR_EVENT_GREP_PATTERNS } from '../../application/use-cases/major-event-classifier';
+import { ILogSource, LogEntry, LogReadRequest, LogTextRange, LogObserver, LogSubscription, ServiceRef } from '../../domain/contracts';
+
+export class LocalLogSource implements ILogSource {
+  private readonly logBasePath = '/var/log/open5gs';
+
+  constructor(
+    private readonly hostExecutor: IHostExecutor,
+    private readonly logger: pino.Logger,
+    readonly targetId = 'local',
+  ) {}
+
+
+  private name(service: ServiceRef): string {
+    if (service.targetId !== this.targetId) throw new Error('Log service belongs to a different target');
+    return service.nf;
+  }
+
+  readRecent(request: LogReadRequest): Promise<LogEntry[]> {
+    return this.getRecentLogs(request.services.map(service => this.name(service)), request.limit);
+  }
+
+  readMajorEventCandidates(request: { services: readonly ServiceRef[]; maxPerService: number }): Promise<LogEntry[]> {
+    const names = request.services.map(service => this.name(service));
+    const patterns = Object.fromEntries(Object.entries(MAJOR_EVENT_GREP_PATTERNS).filter(([service]) => names.includes(service)));
+    return this.getGreppedLogs(patterns, request.maxPerService);
+  }
+
+  follow(ref: ServiceRef, observer: LogObserver): LogSubscription {
+    const service = this.name(ref);
+    const process = spawn('tail', ['-f', '-n', '0', this.getLogPath(service)]);
+    let finished = false;
+    process.stdout.on('data', (data: Buffer) => {
+      const lines = data.toString().split('\n').filter(line => line.trim());
+      for (const line of lines) {
+        const entry = this.parseLogLine(line, service);
+        if (entry) observer.onEntry(entry);
+      }
+    });
+    process.stderr.on('data', (data: Buffer) => {
+      this.logger.warn({ service, stderr: data.toString() }, 'tail stderr');
+    });
+    process.on('close', code => {
+      if (code !== 0 && code !== null) this.logger.warn({ service, code }, 'tail process closed with error');
+      finished = true;
+      observer.onEnd?.();
+    });
+    process.on('error', err => {
+      this.logger.error({ service, err: String(err) }, 'tail process error');
+      finished = true;
+      observer.onError?.(err);
+    });
+    return { cancel: () => {
+      if (finished) return;
+      process.kill();
+      finished = true;
+    } };
+  }
+
+  async getRecentLogs(services: string[], limit: number = 100): Promise<LogEntry[]> {
+    const logs: LogEntry[] = [];
+
+    for (const service of services) {
+      try {
+        const logPath = this.getLogPath(service);
+
+        // Use tail to get last N lines
+        const result = await this.hostExecutor.executeCommand('tail', [
+          '-n',
+          limit.toString(),
+          logPath,
+        ]);
+
+        if (result.exitCode === 0) {
+          const lines = result.stdout.split('\n').filter(line => line.trim());
+          for (const line of lines) {
+            const logEntry = this.parseLogLine(line, service);
+            if (logEntry) {
+              logs.push(logEntry);
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ service, err: String(err) }, 'Failed to fetch logs for service');
+      }
+    }
+
+    // Each service's lines were pushed as one contiguous block (tail per
+    // service, in a loop) — sort by timestamp so a multi-service selection
+    // actually interleaves instead of showing one service's block followed
+    // by the next's.
+    logs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return logs.slice(-limit);
+  }
+
+  // For the Major Events view: getRecentLogs()'s "tail -n limit per service, then slice to
+  // limit globally" doesn't work here — a single chatty NF (multi-GB DEBUG logs) can crowd
+  // out a quiet one within seconds, so a fixed-line tail window ends up covering only a few
+  // minutes of wall time even at a large limit.
+  //
+  // A naive "grep the whole file" fix (tried first) finds every match correctly, but grep
+  // has to sequentially scan from byte 0 — measured at 12-17s on this host's 2.7GB mme.log
+  // once it's not fully page-cached (which it won't be most of the time, since these files
+  // grow constantly and evict their own older pages). Running multiple such greps in
+  // parallel made it *worse* (16.8s vs 12.6s sequential) — disk I/O contention, not CPU, is
+  // the bottleneck, so concurrency doesn't help.
+  //
+  // Fix: `tail -c <bytes>` seeks directly near the end of the file instead of scanning from
+  // the start (measured ~0.5-1s for several hundred MB regardless of total file size), piped
+  // into `grep` so only that bounded window is scanned. GREP_TAIL_BYTES below covers many
+  // days on this host's actual log growth rate — comfortably more than the 24h+ this view
+  // needs to show — while keeping worst-case latency to roughly one bounded read per
+  // service. Sequential on purpose (see contention note above).
+  private static readonly GREP_TAIL_BYTES = 300 * 1024 * 1024;
+
+  private grepTail(logPath: string, pattern: string, tailBytes: number, timeoutMs: number): Promise<string> {
+    return new Promise((resolve) => {
+      const tail = spawn('nsenter', ['-t', '1', '-m', '-u', '-i', '-p', 'tail', '-c', String(tailBytes), logPath]);
+      const grep = spawn('nsenter', ['-t', '1', '-m', '-u', '-i', '-p', 'grep', '-a', '-E', pattern]);
+      // grep.stdin can EPIPE if grep exits (e.g. killed on timeout) before tail finishes
+      // writing — without this handler that's an unhandled 'error' event, which crashes the
+      // whole Node process, not just this request.
+      grep.stdin.on('error', () => {});
+      tail.stdout.pipe(grep.stdin);
+      tail.on('error', () => grep.stdin.end());
+
+      let out = '';
+      grep.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+      const timer = setTimeout(() => { tail.kill(); grep.kill(); resolve(out); }, timeoutMs);
+      grep.on('close', () => { clearTimeout(timer); resolve(out); });
+      grep.on('error', () => { clearTimeout(timer); resolve(out); });
+    });
+  }
+
+  async getGreppedLogs(grepPatterns: Record<string, string>, maxPerService: number): Promise<LogEntry[]> {
+    const logs: LogEntry[] = [];
+
+    // Sequential, not Promise.all — see the contention note above.
+    for (const [service, pattern] of Object.entries(grepPatterns)) {
+      try {
+        const logPath = this.getLogPath(service);
+        const stdout = await this.grepTail(logPath, pattern, LocalLogSource.GREP_TAIL_BYTES, 20000);
+        const lines = stdout.split('\n').filter(line => line.trim()).slice(-maxPerService);
+        for (const line of lines) {
+          const logEntry = this.parseLogLine(line, service);
+          if (logEntry) logs.push(logEntry);
+        }
+      } catch (err) {
+        this.logger.warn({ service, err: String(err) }, 'Failed to grep log for major events');
+      }
+    }
+
+    logs.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return logs;
+  }
+
+  private parseLogLine(line: string, service: string): LogEntry | null {
+    if (!line.trim()) return null;
+
+    try {
+      // Open5GS log format is typically: MM/DD HH:MM:SS.mmm: [level] message
+      // Example: 02/22 20:15:32.123: [info] NRF initialization...
+
+      const timestampMatch = line.match(/^(\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}):/);
+
+      let timestamp: string;
+      let message: string;
+
+      if (timestampMatch) {
+        const dateTimeStr = timestampMatch[1];
+        // Convert MM/DD HH:MM:SS.mmm to ISO format (approximate - use current year)
+        const year = new Date().getFullYear();
+        const [datePart, timePart] = dateTimeStr.split(/\s+/);
+        const [month, day] = datePart.split('/');
+        // open5gs writes these timestamps in the HOST's local time, not UTC.
+        // No "Z" suffix here — this must parse as local time (the container's
+        // /etc/localtime is bind-mounted from the host, see docker-compose.yml)
+        // so toISOString() converts it to true UTC instead of mislabeling it.
+        timestamp = new Date(`${year}-${month}-${day}T${timePart}`).toISOString();
+        message = line.substring(timestampMatch[0].length).trim();
+      } else {
+        // Fallback if no timestamp found
+        timestamp = new Date().toISOString();
+        message = line;
+      }
+
+      return {
+        timestamp,
+        service,
+        message,
+      };
+    } catch (err) {
+      // Return raw line if parsing fails
+      return {
+        timestamp: new Date().toISOString(),
+        service,
+        message: line,
+      };
+    }
+  }
+
+  getLogPath(service: string): string {
+    return `${this.logBasePath}/${service}.log`;
+  }
+
+  // IMS components (Kamailio P/I/S-CSCF + SMSC, PyHSS, MariaDB) log to the host's
+  // systemd journal only — no discrete file like the core-17 NFs — so recent
+  // logs come from `journalctl -u <unit>` instead of `tail` on a log path.
+  async getRecentJournalLogs(unit: string, limit: number = 100): Promise<LogEntry[]> {
+    try {
+      const result = await this.hostExecutor.executeCommand('journalctl', [
+        '-u', unit, '-n', String(limit), '--no-pager', '-o', 'short-iso',
+      ]);
+      if (result.exitCode !== 0) return [];
+      return result.stdout
+        .split('\n')
+        .filter(line => line.trim())
+        .map(line => this.parseJournalLine(line, unit))
+        .filter((l): l is LogEntry => l !== null);
+    } catch (err) {
+      this.logger.warn({ unit, err: String(err) }, 'Failed to fetch journal logs for unit');
+      return [];
+    }
+  }
+
+  // `-o short-iso` format: "2026-07-26T01:30:41-04:00 hostname comm[pid]: message"
+  parseJournalLine(line: string, service: string): LogEntry | null {
+    if (!line.trim()) return null;
+    const m = line.match(/^(\S+)\s+\S+\s+\S+:\s?(.*)$/s);
+    if (!m) return { timestamp: new Date().toISOString(), service, message: line };
+    const [, ts, message] = m;
+    const parsed = new Date(ts);
+    return {
+      timestamp: isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString(),
+      service,
+      message,
+    };
+  }
+
+  async getRecentLogsFromPath(logPath: string, serviceLabel: string, limit: number = 100): Promise<LogEntry[]> {
+    try {
+      const content = await readFile(logPath, 'utf8').catch(() => '');
+      const lines   = content.split('\n').filter(l => l.trim()).slice(-limit);
+      return lines.map(line => ({
+        timestamp: new Date().toISOString(),
+        service:   serviceLabel,
+        message:   line,
+      }));
+    } catch {
+      return [];
+    }
+  }
+  async readText(service: ServiceRef, range: LogTextRange): Promise<string> {
+    const logPath = this.getLogPath(this.name(service));
+    try {
+      if (range.type === 'lines') {
+        // Read last N lines using Node — no shell needed
+        const content = await readFile(logPath, 'utf8');
+        const lines   = content.split('\n');
+        const n       = Math.min(range.lines || 500, 100000);
+        return lines.slice(-n).join('\n');
+      } else if (range.type === 'date' && range.from && range.to) {
+        const content = await readFile(logPath, 'utf8');
+        const from    = new Date(range.from);
+        const to      = new Date(range.to);
+        const fmt     = (d: Date) => {
+          const mm  = String(d.getMonth() + 1).padStart(2, '0');
+          const dd  = String(d.getDate()).padStart(2, '0');
+          const hh  = String(d.getHours()).padStart(2, '0');
+          const min = String(d.getMinutes()).padStart(2, '0');
+          const ss  = String(d.getSeconds()).padStart(2, '0');
+          return `${mm}/${dd} ${hh}:${min}:${ss}`;
+        };
+        const fromStr = fmt(from);
+        const toStr   = fmt(to);
+        return content
+          .split('\n')
+          .filter(line => {
+            const ts = line.slice(0, 14);
+            return ts >= fromStr && ts <= toStr;
+          })
+          .join('\n');
+      } else {
+        // all — just read the whole file
+        return await readFile(logPath, 'utf8');
+      }
+    } catch {
+      return ''; // file doesn't exist or isn't readable
+    }
+  }
+}

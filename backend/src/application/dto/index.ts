@@ -1,4 +1,5 @@
 import { ServiceName } from '../../domain/entities/service-status';
+import type { KubernetesWorkloadStatus } from '../../domain/entities/kubernetes-workload-status';
 
 // ── Common SBI Structures ──
 export interface SbiServerDto {
@@ -393,11 +394,15 @@ export interface ServiceStatusDto {
   subState: string;
   pid: number | null;
   uptime: string | null;
-  restartCount: number;
+  restartCount: number | null;
   cpuPercent: number | null;
   memoryBytes: number | null;
   memoryPercent: number | null;
   lastChecked: string;
+  source?: 'systemd' | 'docker' | 'direct' | 'kubernetes';
+  actionsSupported?: boolean;
+  kubernetes?: KubernetesWorkloadStatus;
+  error?: string;
 }
 
 export interface ServiceActionDto {

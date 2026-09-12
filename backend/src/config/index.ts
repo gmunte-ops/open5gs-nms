@@ -1,4 +1,7 @@
+import { Open5gsRuntime, parseOpen5gsRuntime } from './runtime-policy';
+
 export interface AppConfig {
+  open5gsRuntime: Open5gsRuntime;
   port: number;
   wsPort: number;
   mongodbUri: string;
@@ -28,6 +31,7 @@ export function loadAppConfig(): AppConfig {
   const isProduction = process.env.NODE_ENV === 'production';
 
   return {
+    open5gsRuntime: parseOpen5gsRuntime(process.env.OPEN5GS_RUNTIME),
     port: parseInt(process.env.PORT || '3001', 10),
     wsPort: parseInt(process.env.WS_PORT || '3002', 10),
     mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/open5gs',

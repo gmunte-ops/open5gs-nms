@@ -1,3 +1,5 @@
+import type { KubernetesWorkloadStatus } from './kubernetes-workload-status';
+
 // All Open5GS Network Functions (4G EPC + 5G Core) + infrastructure + Osmocom services
 export type ServiceName =
   // Infrastructure
@@ -98,13 +100,16 @@ export interface ServiceStatus {
   subState: string;
   pid: number | null;
   uptime: string | null;
-  restartCount: number;
+  restartCount: number | null;
   cpuPercent: number | null;
   memoryBytes: number | null;
   memoryPercent: number | null;
   lastChecked: string;
   // 'systemd' = found via systemctl, 'docker' = found via docker, 'direct' = TCP ping
   source?: 'systemd' | 'docker' | 'direct' | 'kubernetes';
+  actionsSupported?: boolean;
+  kubernetes?: KubernetesWorkloadStatus;
+  error?: string;
 }
 
 export interface ServiceStatusMap {

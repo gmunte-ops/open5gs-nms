@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { ServiceCapabilityObservation } from '../types/service-capabilities';
 import type { AuthUser } from '../contexts/AuthContext';
 import type {
   AllConfigs,
@@ -62,6 +63,9 @@ export const configApi = {
 
 // ── Services ──
 export const serviceApi = {
+  getCapabilities: (name?: string) => api.get<{ success: boolean; data: ServiceCapabilityObservation }>(
+    `/service-capabilities${name === undefined ? '' : `/${encodeURIComponent(name)}`}`,
+  ).then(r => r.data.data),
   getAll: () => api.get<{ success: boolean; data: ServiceStatus[] }>('/services').then((r) => r.data.data),
   getOne: (name: string) =>
     api.get<{ success: boolean; data: ServiceStatus }>(`/services/${name}`).then((r) => r.data.data),

@@ -5,7 +5,12 @@ import compression from 'compression';
 import { WebSocketServer } from 'ws';
 import pino from 'pino';
 import { loadAppConfig } from './config';
+import { runtimeCapabilities } from './config/runtime-policy';
+import { createRuntimeMiddleware } from './interfaces/rest/middleware/runtime-middleware';
+import { LocalServiceAdapter } from './infrastructure/system/local-service-adapter';
 import { LocalHostExecutor } from './infrastructure/system/local-host-executor';
+import { KubernetesServiceAdapter } from './infrastructure/kubernetes/kubernetes-service-adapter';
+import { ServiceProviderRegistry } from './infrastructure/runtime/service-provider-registry';
 import { KubernetesServiceRuntime } from './infrastructure/kubernetes/kubernetes-service-runtime';
 import { YamlConfigRepository } from './infrastructure/yaml/yaml-config-repository';
 import { MongoSubscriberRepository } from './infrastructure/mongodb/mongo-subscriber-repository';
@@ -25,6 +30,8 @@ import { PlmnMigrationUseCase } from './application/use-cases/plmn-migration-use
 import { PcapUseCase } from './application/use-cases/pcap';
 import { RestoreDefaultsUseCase } from './application/use-cases/restore-defaults';
 import { AutoConfigUseCase } from './application/use-cases/auto-config';
+import { LocalLogSource } from './infrastructure/system/local-log-source';
+import { createLogSource } from './infrastructure/runtime/log-source-factory';
 import { LogStreamingUseCase } from './application/use-cases/log-streaming';
 import { DockerLogStreamingUseCase } from './application/use-cases/docker-log-streaming';
 import { DockerLogExecutor } from './infrastructure/docker/docker-log-executor';
@@ -55,6 +62,8 @@ import { MongoApnProfileRepository } from './infrastructure/mongodb/mongo-apn-pr
 import { ApnProfileUseCase } from './application/use-cases/apn-profile-usecase';
 import { createAutoConfigRouter } from './interfaces/rest/auto-config-controller';
 import { createServiceRouter } from './interfaces/rest/service-controller';
+import { DiscoverServiceCapabilitiesUseCase } from './application/use-cases/discover-service-capabilities';
+import { createServiceCapabilityRouter } from './interfaces/rest/service-capability-controller';
 import { createSubscriberRouter } from './interfaces/rest/subscriber-controller';
 import { createAuditRouter } from './interfaces/rest/audit-controller';
 import { createTunRouter } from './interfaces/rest/tun-controller';
@@ -128,6 +137,7 @@ import { createSnmpRouter } from './interfaces/rest/snmp-controller';
 async function main() {
   // Load configuration
   const config = loadAppConfig();
+  const capabilities = runtimeCapabilities(config.open5gsRuntime);
 
   // Initialize logger
   const logger = pino({
@@ -150,21 +160,21 @@ async function main() {
   // Initialize infrastructure components
   const hostExecutor = new LocalHostExecutor(logger, config.systemctlPath);
 
-  const serviceRuntime =
-    process.env.OPEN5GS_RUNTIME === 'kubernetes'
-      ? new KubernetesServiceRuntime(
-          process.env.KUBECONFIG || '/etc/open5gs-nms/kubeconfig',
-          process.env.K8S_NAMESPACE || 'default',
-          logger,
-        )
-      : undefined;
-
-  if (serviceRuntime) {
-    logger.info(
-      { namespace: process.env.K8S_NAMESPACE || 'default' },
-      'Kubernetes Open5GS service runtime enabled',
-    );
-  }
+  const serviceProviders = new ServiceProviderRegistry()
+    .register('local', () => new LocalServiceAdapter(hostExecutor, logger))
+    .register('kubernetes', () => {
+      const runtime = new KubernetesServiceRuntime(
+        process.env.KUBECONFIG || '/etc/open5gs-nms/kubeconfig',
+        process.env.K8S_NAMESPACE || 'default',
+        logger,
+      );
+      logger.info(
+        { namespace: process.env.K8S_NAMESPACE || 'default' },
+        'Kubernetes Open5GS service runtime enabled',
+      );
+      return new KubernetesServiceAdapter(runtime, new LocalServiceAdapter(hostExecutor, logger));
+    });
+  const serviceProvider = serviceProviders.create(config.open5gsRuntime);
   const configRepo = new YamlConfigRepository(hostExecutor, config.configPath, logger);
   const subscriberRepo = new MongoSubscriberRepository(config.mongodbUri, logger);
   const rfPlanningProjectRepo = new MongoRfPlanningProjectRepository(config.mongodbUri, logger);
@@ -188,7 +198,7 @@ async function main() {
   // retention, and rate computation are all owned by the Prometheus instance
   // already running in this stack (see prometheus-metrics.ts header comment).
   const subscriberIpAccounting = new SubscriberIpAccounting(hostExecutor, subscriberRepo, logger);
-  subscriberIpAccounting.start();
+  if (capabilities.hostDataplane) subscriberIpAccounting.start();
 
   // Keeps the MM1 MSISDN header-injection proxy's UE-IP -> MSISDN map fresh
   // (see mms-controller.ts) so a new subscriber or a reassigned Framed Route
@@ -196,7 +206,9 @@ async function main() {
   const mmsMsisdnMapRefresher = new MmsMsisdnMapRefresher(subscriberRepo, logger);
   mmsMsisdnMapRefresher.start();
   const trafficMetricsGtpMonitor = new GtpBandwidthMonitor(hostExecutor, configRepo, logger);
-  const trafficMetricsRegistry = createTrafficMetricsRegistry(trafficMetricsGtpMonitor, subscriberIpAccounting);
+  const trafficMetricsRegistry = capabilities.hostDataplane
+    ? createTrafficMetricsRegistry(trafficMetricsGtpMonitor, subscriberIpAccounting)
+    : new promClient.Registry();
 
   // TWAMP reflector testing (Nokia radios + any other configured target) —
   // background poller caches the latest result per target; both the
@@ -244,18 +256,20 @@ async function main() {
   const radioTagRepo = new SqliteRadioTagRepository(authRepo.getDb());
   const radioBlockRepo = new SqliteRadioBlockRepository(authRepo.getDb());
   const radioBlockService = new RadioBlockService(hostExecutor, radioBlockRepo, logger);
-  radioBlockService.start();
+  if (capabilities.hostDataplane) radioBlockService.start();
   const gnbBlockRepo = new SqliteGnbBlockRepository(authRepo.getDb());
   const gnbBlockService = new GnbBlockService(hostExecutor, gnbBlockRepo, logger);
-  gnbBlockService.start();
+  if (capabilities.hostDataplane) gnbBlockService.start();
 
   // Ensure backup directories exist
-  try {
-    await hostExecutor.createDirectory(config.backupPath);
-    await hostExecutor.createDirectory(config.mongoBackupPath);
-    logger.info({ configBackup: config.backupPath, mongoBackup: config.mongoBackupPath }, 'Backup directories initialized');
-  } catch (err) {
-    logger.warn({ err: String(err) }, 'Failed to create backup directories (may already exist)');
+  if (capabilities.coreConfiguration) {
+    try {
+      await hostExecutor.createDirectory(config.backupPath);
+      await hostExecutor.createDirectory(config.mongoBackupPath);
+      logger.info({ configBackup: config.backupPath, mongoBackup: config.mongoBackupPath }, 'Backup directories initialized');
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'Failed to create backup directories (may already exist)');
+    }
   }
 
   // Initialize WebSocket server
@@ -282,12 +296,14 @@ async function main() {
   // open5gs-nms-backend scrape job added below — until the user happened to
   // click Apply Config again. Traffic History would silently show no data
   // until then. Syncing here removes that gap entirely.
-  try {
-    const currentConfigs = ConfigMapper.toAllDto(await configRepo.loadAll());
-    const promSyncResult = await syncPrometheusUseCase.execute(currentConfigs);
-    logger.info({ result: promSyncResult }, 'Prometheus config synced on startup');
-  } catch (err) {
-    logger.warn({ err: String(err) }, 'Prometheus config sync on startup failed (non-fatal)');
+  if (capabilities.managedPrometheusConfig) {
+    try {
+      const currentConfigs = ConfigMapper.toAllDto(await configRepo.loadAll());
+      const promSyncResult = await syncPrometheusUseCase.execute(currentConfigs);
+      logger.info({ result: promSyncResult }, 'Prometheus config synced on startup');
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'Prometheus config sync on startup failed (non-fatal)');
+    }
   }
 
   // Regenerate GenieACS's default/inform provisions on every startup, same
@@ -320,14 +336,12 @@ async function main() {
     config.backupPath,
     syncPrometheusUseCase,
   );
-  // FIXED: Correct parameter order for ServiceMonitorUseCase
-  // constructor(hostExecutor, wsBroadcaster, auditLogger, logger)
+  // Local FM/lifecycle uses semantic contracts; Kubernetes routing stays unchanged.
   const serviceMonitorUseCase = new ServiceMonitorUseCase(
-    hostExecutor,
+    serviceProvider,
     wsBroadcaster,
     auditLogger,
     logger,
-    serviceRuntime,
   );
   const tunUseCase = new TunManagementUseCase(hostExecutor, logger, configRepo);
   const subscriberManagementUseCase = new SubscriberManagementUseCase(
@@ -386,7 +400,11 @@ async function main() {
     logger,
     config.backupPath,
   );
-  const logStreamingUseCase = new LogStreamingUseCase(hostExecutor, logger);
+  const localLogSource = new LocalLogSource(hostExecutor, logger);
+  const logStreamingUseCase = new LogStreamingUseCase(createLogSource(
+    config.open5gsRuntime, localLogSource, process.env.KUBECONFIG || '/etc/open5gs-nms/kubeconfig',
+    process.env.K8S_NAMESPACE || 'default',
+  ));
   const dockerLogExecutor = new DockerLogExecutor(logger);
   const dockerLogStreamingUseCase = new DockerLogStreamingUseCase(dockerLogExecutor, logger);
   const activeSessionsUseCase = new ActiveSessionsUseCase(
@@ -423,6 +441,9 @@ async function main() {
     logStreamingUseCase,
     dockerLogStreamingUseCase,
     logger,
+    capabilities.coreLogs,
+    localLogSource,
+    capabilities.coreRecentLogs,
   );
   // The wss itself handles connections — the authenticated upgrade
   // is wired onto the HTTP server after app.listen() below.
@@ -474,6 +495,10 @@ async function main() {
 
   // ── Auth middleware ── all routes below this line are protected
   app.use('/api', authMiddleware);
+  app.get('/api/runtime', (_req, res) => {
+    res.json({ success: true, data: capabilities });
+  });
+  app.use('/api', createRuntimeMiddleware(config.open5gsRuntime));
 
   // API Routes — GET routes open to all authenticated users
   // requireAdmin middleware applied before routers that have write operations
@@ -481,6 +506,9 @@ async function main() {
   app.use('/api/config', createConfigRouter(loadConfigUseCase, validateConfigUseCase, applyConfigUseCase, topologyUseCase, serviceMonitorUseCase, syncSDUseCase, logger));
   app.use('/api/sepp', createSeppRouter(hostExecutor, auditLogger, logger));
   app.use('/api/services', createServiceRouter(serviceMonitorUseCase, logger));
+  app.use('/api/service-capabilities', createServiceCapabilityRouter(
+    new DiscoverServiceCapabilitiesUseCase(serviceProvider), serviceProvider.targetId,
+  ));
   app.use('/api/subscribers', createSubscriberRouter(subscriberManagementUseCase, autoAssignIPsUseCase, logger));
   app.use('/api/audit', createAuditRouter(auditLogger, logger));
   app.use('/api/backup', createBackupRouter(backupRestoreUseCase, restoreDefaultsUseCase, logger));
@@ -508,10 +536,10 @@ async function main() {
   app.use('/api/gnb-block', createGnbBlockRouter(gnbBlockService, getInterfaceStatusForBlock, auditLogger, logger));
   const ueBlockRepo = new SqliteUeBlockRepository(authRepo.getDb());
   const ueBlockService = new UeBlockService(hostExecutor, ueBlockRepo, getInterfaceStatusForBlock, logger);
-  ueBlockService.start();
+  if (capabilities.hostDataplane) ueBlockService.start();
   app.use('/api/ue-block', createUeBlockRouter(ueBlockService, auditLogger, logger));
   app.use('/api/docker', createDockerRouter(dockerLogStreamingUseCase, logger));
-  app.use('/api/logs', createLogDownloadRouter(hostExecutor, config, logger));
+  app.use('/api/logs', createLogDownloadRouter(hostExecutor, config, logger, logStreamingUseCase));
   app.use('/api/genieacs', createGenieacsRouter(config.genieacsNbiUrl, logger, auditLogger, config.backupPath, baicellsUeCounts));
   app.use('/api/chrony',   createChronyRouter(logger, auditLogger));
   app.use('/api/syslog',   createSyslogRouter(logger, auditLogger));
@@ -579,7 +607,7 @@ async function main() {
   // the UI. Non-blocking: never delays HTTP readiness. The script itself is
   // idempotent (marker-file short-circuit), so every startup after the
   // first is an instant no-op.
-  {
+  if (capabilities.coreBinaryPatches) {
     const mmePatchLogger = logger.child({ task: 'mme-dup-release-access-bearers-patch' });
     mmePatchLogger.info('Checking Open5GS MME duplicate-release-access-bearers patch');
     const child = spawn('nsenter', ['-t', '1', '-m', '-u', '-i', '-p', '--',

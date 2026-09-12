@@ -10,12 +10,33 @@ export interface ServiceStatus {
   subState: string;
   pid: number | null;
   uptime: string | null;
-  restartCount: number;
+  restartCount: number | null;
   cpuPercent: number | null;
   memoryBytes: number | null;
   memoryPercent: number | null;
   lastChecked: string;
-  source?: 'systemd' | 'docker' | 'direct';
+  source?: 'systemd' | 'docker' | 'direct' | 'kubernetes';
+  actionsSupported?: boolean;
+  kubernetes?: KubernetesWorkloadStatus;
+  error?: string;
+}
+
+export interface KubernetesWorkloadStatus {
+  namespace: string;
+  deploymentUid: string | null;
+  deploymentGeneration: number | null;
+  status: 'available' | 'pending' | 'unavailable';
+  replicaSet: { name: string; uid: string; revision: string | null } | null;
+  pods: Array<{
+    name: string;
+    uid: string;
+    node: string | null;
+    phase: string;
+    ready: boolean | null;
+    restartCount: number | null;
+    containers: Array<{ name: string; kind: 'regular' | 'init'; ready: boolean | null; restartCount: number | null }>;
+  }>;
+  error?: string;
 }
 
 // ── Common SBI Structures ──
@@ -349,9 +370,14 @@ export interface TopologyNode {
   id: string;
   type: ServiceName;
   label: string;
-  address: string;
-  port: number;
+  address: string | null;
+  port: number | null;
   active: boolean;
+  source?: ServiceStatus['source'];
+  state?: string;
+  subState?: string;
+  error?: string;
+  workload?: string;
 }
 
 export interface TopologyEdge {
@@ -367,6 +393,7 @@ export interface TopologyEdge {
 export interface TopologyGraph {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
+  configurationAvailable?: boolean;
 }
 
 // ── Subscriber Types ──

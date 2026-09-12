@@ -36,6 +36,16 @@ export function createConfigRouter(
   router.get('/topology/graph', async (_req: Request, res: Response) => {
     try {
       logger.info('Fetching network function data for topology');
+      if (serviceMonitorUseCase.isRuntimeManaged('mongodb')) {
+        const statuses = await serviceMonitorUseCase.getAll();
+        const nodes = statuses.filter(status => status.source === 'kubernetes').map(status => ({
+          id: status.name, address: null, port: null, active: status.active,
+          source: status.source, state: status.state, subState: status.subState,
+          error: status.error, workload: status.unitName,
+        }));
+        res.json({ success: true, data: { nodes, edges: [], configurationAvailable: false } });
+        return;
+      }
       const configs = await loadConfigUseCase.execute();
       const statuses = serviceMonitorUseCase.getStatusCache();
 

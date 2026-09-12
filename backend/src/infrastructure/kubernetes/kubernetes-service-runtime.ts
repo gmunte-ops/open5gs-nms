@@ -3,8 +3,9 @@ import pino from 'pino';
 
 import { IServiceRuntime } from '../../domain/interfaces/service-runtime';
 import { ServiceName, ServiceStatus } from '../../domain/entities/service-status';
+import { KubernetesWorkloadResolver } from './kubernetes-workload-resolver';
 
-const DEPLOYMENT_MAP: Partial<Record<ServiceName, string>> = {
+export const DEPLOYMENT_MAP: Partial<Record<ServiceName, string>> = {
   mongodb: 'open5gs-mongodb',
 
   nrf: 'open5gs-nrf',
@@ -29,6 +30,7 @@ const DEPLOYMENT_MAP: Partial<Record<ServiceName, string>> = {
 
 export class KubernetesServiceRuntime implements IServiceRuntime {
   private readonly appsApi: k8s.AppsV1Api;
+  private readonly workloadResolver: KubernetesWorkloadResolver;
 
   constructor(
     kubeconfigPath: string,
@@ -38,6 +40,7 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
     const kc = new k8s.KubeConfig();
     kc.loadFromFile(kubeconfigPath);
     this.appsApi = kc.makeApiClient(k8s.AppsV1Api);
+    this.workloadResolver = new KubernetesWorkloadResolver(this.appsApi, kc.makeApiClient(k8s.CoreV1Api), this.namespace);
   }
 
   handles(service: ServiceName): boolean {
@@ -80,11 +83,9 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
         subState = 'not-ready';
       }
 
-      const availableCondition = deployment.status?.conditions?.find(
-        condition =>
-          condition.type === 'Available' &&
-          condition.status === 'True',
-      );
+      const workload = await this.workloadResolver.resolve(deployment);
+      const restartCount = workload.status === 'available' && workload.pods.every(pod => pod.restartCount !== null)
+        ? workload.pods.reduce((sum, pod) => sum + pod.restartCount!, 0) : null;
 
       return {
         name: service,
@@ -94,15 +95,14 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
         state,
         subState,
         pid: null,
-        uptime: availableCondition?.lastTransitionTime
-          ? String(availableCondition.lastTransitionTime)
-          : null,
-        restartCount: 0,
+        uptime: null,
+        restartCount,
         cpuPercent: null,
         memoryBytes: null,
         memoryPercent: null,
         lastChecked: new Date().toISOString(),
         source: 'kubernetes',
+        kubernetes: workload,
       };
     } catch (err: any) {
       const statusCode =
@@ -121,7 +121,7 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
           subState: 'absent',
           pid: null,
           uptime: null,
-          restartCount: 0,
+          restartCount: null,
           cpuPercent: null,
           memoryBytes: null,
           memoryPercent: null,

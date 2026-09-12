@@ -63,7 +63,7 @@ services:
     environment:
       - TZ=${TZ:-America/New_York}
       - NODE_ENV=production
-      - OPEN5GS_RUNTIME=kubernetes
+      - OPEN5GS_RUNTIME=${OPEN5GS_RUNTIME:-kubernetes}
       - KUBECONFIG=/etc/open5gs-nms/kubeconfig
       - K8S_NAMESPACE=default
       - PORT=3001

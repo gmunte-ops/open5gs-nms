@@ -1,3 +1,5 @@
+import { LogSourceError, LogSubscription } from '../../domain/contracts';
+import { LocalLogSource } from '../system/local-log-source';
 import { WebSocket } from 'ws';
 import pino from 'pino';
 import { spawn, ChildProcess } from 'child_process';
@@ -9,6 +11,7 @@ interface LogStreamSubscription {
   source: 'open5gs' | 'docker' | 'genieacs' | 'frr' | 'ims';
   services: Set<string>;
   processes: Map<string, ChildProcess>;
+  streams: Map<string, LogSubscription>;
   filter?: string; // optional line-content filter
   // Major Events mode — see major-event-classifier.ts. Empty/undefined sets mean "no
   // restriction on that axis" (only the majorEventsOnly flag itself narrows the stream).
@@ -40,6 +43,9 @@ export class LogStreamHandler {
     private readonly logStreamingUseCase: LogStreamingUseCase,
     private readonly dockerLogStreamingUseCase: DockerLogStreamingUseCase,
     private readonly logger: pino.Logger,
+    private readonly coreLogsSupported = true,
+    private readonly localLogCompatibility?: LocalLogSource,
+    private readonly coreRecentLogsSupported = coreLogsSupported,
   ) {}
 
   handleConnection(ws: WebSocket): void {
@@ -66,6 +72,17 @@ export class LogStreamHandler {
   }
 
   private handleMessage(ws: WebSocket, message: any): void {
+    const supported = message.type === 'get_recent_logs' && !message.majorEventsOnly
+      ? this.coreRecentLogsSupported : this.coreLogsSupported;
+    // Unknown sources follow the existing core-source fallback below, so apply
+    // the same operation guard rather than allowing an alias to bypass it.
+    const coreSource = !['docker', 'genieacs', 'frr', 'ims'].includes(message.source);
+    if (!supported && coreSource
+      && ['subscribe_logs', 'get_recent_logs'].includes(message.type)) {
+      ws.send(JSON.stringify({ type: 'error', code: 'RUNTIME_UNSUPPORTED',
+        message: 'This Open5GS log operation is not supported by the target.' }));
+      return;
+    }
     switch (message.type) {
       case 'subscribe_logs':
         this.subscribe(
@@ -112,7 +129,7 @@ export class LogStreamHandler {
         // bounded to a recent byte window (see getGreppedLogs) so it stays fast even cold.
         // 2000/service is still generous relative to typical event volume (the final
         // response is sliced to `limit` anyway) — keeps parse/classify work down.
-        const rawLines = await this.logStreamingUseCase.getGreppedLogs(grepServices, 2000);
+        const rawLines = await this.logStreamingUseCase.getMajorEventLogs(Object.keys(grepServices), 2000);
         const imsis = imsisArr && imsisArr.length > 0 ? new Set(imsisArr) : undefined;
         const radioIps = radioIpsArr && radioIpsArr.length > 0 ? new Set(radioIpsArr) : undefined;
         logs = rawLines
@@ -136,7 +153,7 @@ export class LogStreamHandler {
         // Read GenieACS log files directly from the mounted path
         logs = [];
         for (const service of services) {
-          const serviceLogs = await this.logStreamingUseCase.getRecentLogsFromPath(
+          const serviceLogs = await this.localLogCompatibility!.getRecentLogsFromPath(
             `${this.genieacsLogBasePath}/${service}.log`,
             service,
             limit * 10, // fetch more then filter down
@@ -159,7 +176,7 @@ export class LogStreamHandler {
       } else if (source === 'frr') {
         // Same story as GenieACS above — getRecentLogsFromPath doesn't know this file's own
         // timestamp format, so re-parse each raw line for its real time before sorting.
-        const raw = await this.logStreamingUseCase.getRecentLogsFromPath(this.frrLogPath, 'frr', limit * 10);
+        const raw = await this.localLogCompatibility!.getRecentLogsFromPath(this.frrLogPath, 'frr', limit * 10);
         logs = raw
           .map(l => this.parseFrrLogLine(l.message, 'frr'))
           .filter((l): l is LogEntry => l !== null)
@@ -170,7 +187,7 @@ export class LogStreamHandler {
         // journal only, one unit per service — fetch each, then merge chronologically
         // same as the GenieACS/FRR multi-source-merge above.
         const perService = await Promise.all(
-          services.map(svc => this.logStreamingUseCase.getRecentJournalLogs(svc, limit)),
+          services.map(svc => this.localLogCompatibility!.getRecentJournalLogs(svc, limit)),
         );
         logs = perService
           .flat()
@@ -187,6 +204,9 @@ export class LogStreamHandler {
       }));
     } catch (err) {
       this.logger.error({ err: String(err), source }, 'Failed to send recent logs');
+      if (err instanceof LogSourceError) {
+        ws.send(JSON.stringify({ type: 'error', code: err.code, message: err.message }));
+      }
     }
   }
 
@@ -208,6 +228,7 @@ export class LogStreamHandler {
       source,
       services: new Set(services),
       processes: new Map(),
+      streams: new Map(),
       filter,
       majorEventsOnly,
       imsis: imsisArr && imsisArr.length > 0 ? new Set(imsisArr) : undefined,
@@ -246,97 +267,21 @@ export class LogStreamHandler {
   }
 
   private startServiceStream(ws: WebSocket, service: string, subscription: LogStreamSubscription): void {
-    const logPath = this.logStreamingUseCase.getLogPath(service);
-
-    // Use tail -f to follow log file
-    const process = spawn('tail', [
-      '-f',
-      '-n',
-      '0', // Start from end of file
-      logPath,
-    ]);
-
-    subscription.processes.set(service, process);
-
-    process.stdout.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n').filter(line => line.trim());
-
-      for (const line of lines) {
-        const logEntry = this.parseLogLine(line, service);
-        if (!logEntry) continue;
-
+    const stream = this.logStreamingUseCase.follow(service, {
+      onEntry: logEntry => {
         if (subscription.majorEventsOnly) {
           const event = classifyMajorEvent(logEntry.message, service);
-          if (!event || !matchesEventFilters(event, subscription.imsis, subscription.radioIps, subscription.eventTypes)) continue;
+          if (!event || !matchesEventFilters(event, subscription.imsis, subscription.radioIps, subscription.eventTypes)) return;
           logEntry.event = event;
         }
-
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'log_entry',
-            source: 'open5gs',
-            log: logEntry,
-          }));
+          ws.send(JSON.stringify({ type: 'log_entry', source: 'open5gs', log: logEntry }));
         }
-      }
+      },
+      onEnd: () => { subscription.streams.delete(service); },
+      onError: () => { subscription.streams.delete(service); },
     });
-
-    process.stderr.on('data', (data: Buffer) => {
-      this.logger.warn({ service, stderr: data.toString() }, 'tail stderr');
-    });
-
-    process.on('close', (code) => {
-      // Only log errors, not normal closures
-      if (code !== 0 && code !== null) {
-        this.logger.warn({ service, code }, 'tail process closed with error');
-      }
-      subscription.processes.delete(service);
-    });
-
-    process.on('error', (err) => {
-      this.logger.error({ service, err: String(err) }, 'tail process error');
-      subscription.processes.delete(service);
-    });
-  }
-
-  private parseLogLine(line: string, service: string): LogEntry | null {
-    if (!line.trim()) return null;
-
-    try {
-      // Open5GS log format: MM/DD HH:MM:SS.mmm: [level] message
-      const timestampMatch = line.match(/^(\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}):/);
-      
-      let timestamp: string;
-      let message: string;
-
-      if (timestampMatch) {
-        const dateTimeStr = timestampMatch[1];
-        const year = new Date().getFullYear();
-        const [datePart, timePart] = dateTimeStr.split(/\s+/);
-        const [month, day] = datePart.split('/');
-        // open5gs writes these timestamps in the HOST's local time, not UTC.
-        // No "Z" suffix here — this must parse as local time (the container's
-        // /etc/localtime is bind-mounted from the host, see docker-compose.yml)
-        // so toISOString() converts it to true UTC instead of mislabeling it.
-        timestamp = new Date(`${year}-${month}-${day}T${timePart}`).toISOString();
-        message = line.substring(timestampMatch[0].length).trim();
-      } else {
-        timestamp = new Date().toISOString();
-        message = line;
-      }
-
-      return {
-        timestamp,
-        service,
-        message,
-      };
-    } catch (err) {
-      return {
-        timestamp: new Date().toISOString(),
-        service,
-        message: line,
-      };
-    }
+    subscription.streams.set(service, stream);
   }
 
   private startGenieacsStream(ws: WebSocket, service: string, subscription: LogStreamSubscription): void {
@@ -454,7 +399,7 @@ export class LogStreamHandler {
     process.stdout.on('data', (data: Buffer) => {
       const lines = data.toString().split('\n').filter(line => line.trim());
       for (const line of lines) {
-        const logEntry = this.logStreamingUseCase.parseJournalLine(line, service);
+        const logEntry = this.localLogCompatibility!.parseJournalLine(line, service);
         if (logEntry && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'log_entry', source: 'ims', log: logEntry }));
         }
@@ -589,6 +534,10 @@ export class LogStreamHandler {
       }
     }
 
+    for (const [service, stream] of subscription.streams) {
+      try { stream.cancel(); }
+      catch (err) { this.logger.error({ service, err: String(err) }, 'Failed to kill process'); }
+    }
     this.subscriptions.delete(ws);
     this.logger.debug('Log stream subscription stopped');
   }
