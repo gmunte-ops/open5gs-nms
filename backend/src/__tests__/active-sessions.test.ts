@@ -1,3 +1,4 @@
+import { LocalLegacySessions } from '../infrastructure/diagnostics/local-legacy-sessions';
 /**
  * Unit tests for RAN UE session reporting
  *
@@ -188,7 +189,7 @@ describe('getActive4GUEs', () => {
       [`${AMF_BASE}/ue-info?`]:  apiResponse([]),
       [`${AMF_BASE}/gnb-info?`]: apiResponse([]),
     });
-    return new ActiveSessionsUseCase(
+    return localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
   }
@@ -290,7 +291,7 @@ describe('getActive4GUEs', () => {
       [`${AMF_BASE}/ue-info?`]:     apiResponse([]),
       [`${AMF_BASE}/gnb-info?`]:    apiResponse([]),
     });
-    const useCase = new ActiveSessionsUseCase(
+    const useCase = localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
     const ues = await useCase.getActive4GUEs();
@@ -306,7 +307,7 @@ describe('getActive4GUEs', () => {
       [`${AMF_BASE}/ue-info?`]:  apiResponse([]),
       [`${AMF_BASE}/gnb-info?`]: apiResponse([]),
     });
-    const useCase = new ActiveSessionsUseCase(executor, makeConfigRepo(), subRepo, logger);
+    const useCase = localSessions(executor, makeConfigRepo(), subRepo, logger);
     const ues = await useCase.getActive4GUEs();
     expect(ues[0].nickname).toBe('Test Phone');
   });
@@ -393,7 +394,7 @@ describe('getActive4GUEs', () => {
       [`${AMF_BASE}/ue-info?`]:  apiResponse([]),
       [`${AMF_BASE}/gnb-info?`]: apiResponse([]),
     });
-    const useCase = new ActiveSessionsUseCase(
+    const useCase = localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
     const ues = await useCase.getActive4GUEs();
@@ -414,7 +415,7 @@ describe('getActive5GUEs', () => {
       [`${AMF_BASE}/ue-info?`]:  apiResponse(amfUes),
       [`${AMF_BASE}/gnb-info?`]: apiResponse(amfGnbs),
     });
-    return new ActiveSessionsUseCase(
+    return localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
   }
@@ -536,7 +537,7 @@ describe('getActive5GUEs', () => {
       [`${SMF_BASE}/metrics`]: prometheusText,
       [`http://127.0.0.7:9090/metrics`]: prometheusText, // UPF
     });
-    const useCase = new ActiveSessionsUseCase(
+    const useCase = localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
     const ues = await useCase.getActive5GUEs();
@@ -565,7 +566,7 @@ describe('5G/4G deduplication', () => {
       [`${MME_BASE}/enb-info?`]: apiResponse([mmeEnbInfo()]),
     });
 
-    const useCase = new ActiveSessionsUseCase(
+    const useCase = localSessions(
       executor, makeConfigRepo(), makeSubscriberRepo(), logger,
     );
 
@@ -590,7 +591,7 @@ describe('GetInterfaceStatus', () => {
   function makeStatus(responses: Record<string, string>) {
     const executor   = makeHostExecutor(responses);
     const subRepo    = makeSubscriberRepo();
-    const sessions   = new ActiveSessionsUseCase(executor, makeConfigRepo(), subRepo, logger);
+    const sessions   = localSessions(executor, makeConfigRepo(), subRepo, logger);
     // Points at an unused local port — GenieACS isn't part of this test's
     // scope, this just needs to fail fast (connection refused) so
     // BaicellsUeCountsUseCase.getAll()'s own try/catch returns [] quickly,
@@ -753,3 +754,5 @@ describe('GetInterfaceStatus', () => {
     expect(status.activeUEs5G).toHaveLength(0);
   });
 });
+
+function localSessions(...args: ConstructorParameters<typeof LocalLegacySessions>) { return new ActiveSessionsUseCase(new LocalLegacySessions(...args)); }

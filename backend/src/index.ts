@@ -74,6 +74,12 @@ import { GtpBandwidthMonitor } from './application/use-cases/interface-status/gt
 import { ImsCallStatsMonitor } from './application/use-cases/ims/call-stats-monitor';
 import { IpsecSaCleanup } from './application/use-cases/ims/ipsec-sa-cleanup';
 import { ActiveSessionsUseCase } from './application/use-cases/active-sessions';
+import { LocalDiagnosticsHttp } from './infrastructure/diagnostics/local-diagnostics-http';
+import { LocalLegacySessions } from './infrastructure/diagnostics/local-legacy-sessions';
+import { createLegacySessions } from './infrastructure/runtime/nf-diagnostics-factory';
+import { LocalNfDiagnostics } from './infrastructure/diagnostics/local-nf-diagnostics';
+import { createNfDiagnostics } from './infrastructure/runtime/nf-diagnostics-factory';
+import { createDiagnosticsRouter } from './interfaces/rest/diagnostics-controller';
 import { SuciManagementUseCase } from './application/use-cases/suci-management';
 import { SyncSDUseCase } from './application/use-cases/sync-sd-usecase';
 import { AutoAssignIPsUseCase } from './application/use-cases/auto-assign-ips-usecase';
@@ -407,18 +413,16 @@ async function main() {
   ));
   const dockerLogExecutor = new DockerLogExecutor(logger);
   const dockerLogStreamingUseCase = new DockerLogStreamingUseCase(dockerLogExecutor, logger);
-  const activeSessionsUseCase = new ActiveSessionsUseCase(
-    hostExecutor,
-    configRepo,
-    subscriberRepo,
-    logger,
-  );
+  const activeSessionsUseCase = new ActiveSessionsUseCase(createLegacySessions(config.open5gsRuntime,
+    () => new LocalLegacySessions(hostExecutor, configRepo, subscriberRepo, logger)));
   const baicellsUeCounts = new BaicellsUeCountsUseCase(
     config.genieacsNbiUrl,
     hostExecutor,
     configRepo,
     logger,
   );
+  const nfDiagnostics = createNfDiagnostics(config.open5gsRuntime,
+    () => new LocalNfDiagnostics(new LocalDiagnosticsHttp(hostExecutor, configRepo, logger), subscriberRepo, baicellsUeCounts));
   const suciManagementUseCase = new SuciManagementUseCase(
     hostExecutor,
     configRepo,
@@ -501,6 +505,10 @@ async function main() {
   app.use('/api', createRuntimeMiddleware(config.open5gsRuntime));
 
   // API Routes — GET routes open to all authenticated users
+  app.use('/api/diagnostics', createDiagnosticsRouter(nfDiagnostics, {
+    configurationRead: capabilities.coreConfiguration, tags: capabilities.hostDataplane,
+    radioEnforcement: capabilities.hostDataplane, ueEnforcement: capabilities.hostDataplane,
+  }));
   // requireAdmin middleware applied before routers that have write operations
   app.use('/api/users', createUsersRouter(userManagementUseCase, logger));
   app.use('/api/config', createConfigRouter(loadConfigUseCase, validateConfigUseCase, applyConfigUseCase, topologyUseCase, serviceMonitorUseCase, syncSDUseCase, logger));

@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Radio, Activity, Users, Circle, Wifi, Network, Shield, ChevronRight, ArrowUp, ArrowDown, Pencil, Check, X, Map, Server, ArrowRight, Filter, Tag, ShieldOff, ShieldAlert, UserX, UserCheck, Pin } from 'lucide-react';
-import { useTopologyStore } from '../../stores';
+import { useNfDiagnostics } from '../../hooks/useNfDiagnostics';
+import { diagnosticsInterfaceView, diagnosticsPermitted, readable, legacyRanManagementAllowed } from '../diagnostics/diagnostics-view';
+import { DiagnosticsStatus, ObservationStatus } from '../diagnostics/DiagnosticsStatus';
 import { radioTagsApi, radioBlockApi, gnbBlockApi, configApi } from '../../api';
 import { getBlockedUes, blockUe, unblockUe } from '../../api/ueBlock';
 import { ConfirmModal } from '../common/ConfirmModal';
@@ -16,7 +18,7 @@ interface RANPageProps {
 interface ConnectedRadio {
   ip: string;
   numConnectedUes: number;
-  setupSuccess: boolean;
+  setupSuccess: boolean | null;
   plmn?: string;
   // MME/AMF's own live count — ECM/CM-CONNECTED UEs only. Confirmed against Open5GS's real
   // source (src/mme/enb-info.c): this is a live walk of the eNB's/gNB's own currently-attached
@@ -33,11 +35,13 @@ interface ConnectedRadio {
 }
 
 interface UeApnSession {
+  id?: string;
   apn: string;
   ip: string;
 }
 
 interface ActiveUE {
+  suci?: string;
   // Primary session — mirrors sessions[0]. Kept for any place that only
   // needs a single at-a-glance value.
   ip: string;
@@ -45,8 +49,8 @@ interface ActiveUE {
   cmState?: string;
   dnn?: string;
   apn?: string;
-  // Every concurrent PDU/PDN session this UE currently holds (one per
-  // APN — e.g. "internet" + "ims" for VoLTE). Always at least one entry.
+  // Every observed PDU/PDN session, including distinct sessions sharing an APN.
+  // A registered UE can have no observed session.
   sessions?: UeApnSession[];
   sliceSst?: number;
   sliceSd?: string;
@@ -79,7 +83,7 @@ function withBlockedRadios(live: ConnectedRadio[], blockedIps: Set<string>): Con
 }
 
 function ueSessions(ue: ActiveUE): UeApnSession[] {
-  if (ue.sessions && ue.sessions.length > 0) return ue.sessions;
+  if (ue.sessions) return ue.sessions;
   return [{ apn: ue.dnn || ue.apn || '', ip: ue.ip }];
 }
 
@@ -184,7 +188,7 @@ function UESubRow({ ue, gen, onNavigate }: {
       <ChevronRight className="w-3 h-3 text-nms-text-dim flex-shrink-0" />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
-          <button onClick={() => onNavigate?.(ue.imsi)} className="text-xs font-mono text-nms-accent hover:underline text-left truncate">{ue.imsi}</button>
+          <button disabled={!ue.imsi} onClick={() => onNavigate?.(ue.imsi)} className="text-xs font-mono text-nms-accent hover:underline text-left truncate">{ue.imsi || ue.suci || 'Identity unavailable'}</button>
         </div>
         {ue.nickname && <span className="text-xs text-nms-text-dim block truncate">{ue.nickname}</span>}
       </div>
@@ -383,7 +387,7 @@ function RadioListTable({ radios, ues, generation, deviceLabel, radioTags, radio
               <RadioBlockButton ip={radio.ip} isBlocked={isBlocked} isAdmin={isAdmin} isSyntheticIp={isSyntheticIp}
                 deviceNoun={deviceNoun} deviceNounCap={deviceNounCap} blockedInterfaces={blockedInterfaces}
                 onRequestBlock={onRequestBlock} onUnblock={onUnblock} />
-              <Circle className={clsx('w-2 h-2', radio.setupSuccess ? 'fill-nms-green text-nms-green' : 'fill-nms-red text-nms-red')} />
+              <Circle aria-label={radio.setupSuccess === null ? 'Observed peer; connectivity unknown' : undefined} className={clsx('w-2 h-2', radio.setupSuccess === null ? 'text-nms-text-dim' : radio.setupSuccess ? 'fill-nms-green text-nms-green' : 'fill-nms-red text-nms-red')} />
             </div>
           </div>
           {radioUEs.length > 0 && (
@@ -554,7 +558,7 @@ function RadioList(props: RadioListProps): JSX.Element {
 function InterfaceCard({ icon, title, subtitle, active, radios, deviceLabel, generation, ues,
   radioTags, radioBands, isAdmin, onTagSave, onBandSave, onNavigateToSubscriber, hasActiveFilter,
   blockedIps, onRequestBlock, onUnblock, layout }: {
-  icon: React.ReactNode; title: string; subtitle: string; active: boolean;
+  icon: React.ReactNode; title: string; subtitle: string; active: boolean | null;
   radios: ConnectedRadio[]; deviceLabel: string; generation: '4G' | '5G';
   ues: ActiveUE[]; radioTags: Record<string, string>; radioBands: Record<string, string>; isAdmin: boolean;
   onTagSave: (ip: string, nickname: string) => Promise<void>;
@@ -572,8 +576,8 @@ function InterfaceCard({ icon, title, subtitle, active, radios, deviceLabel, gen
   return (
     <div className="nms-card">
       <div className="flex items-center gap-3 mb-4">
-        <div className={clsx('p-2 rounded-lg', active ? 'bg-nms-green/10' : 'bg-nms-red/10')}>
-          <div className={active ? 'text-nms-green' : 'text-nms-red'}>{icon}</div>
+        <div className={clsx('p-2 rounded-lg', active === null ? 'bg-nms-bg' : active ? 'bg-nms-green/10' : 'bg-nms-red/10')}>
+          <div className={active === null ? 'text-nms-text-dim' : active ? 'text-nms-green' : 'text-nms-red'}>{icon}</div>
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
@@ -584,9 +588,9 @@ function InterfaceCard({ icon, title, subtitle, active, radios, deviceLabel, gen
         </div>
       </div>
       <div className="flex items-center gap-2 mb-4">
-        <Circle className={clsx('w-2 h-2', active ? 'fill-nms-green text-nms-green' : 'fill-nms-red text-nms-red')} />
-        <span className={clsx('text-sm font-medium', active ? 'text-nms-green' : 'text-nms-red')}>{active ? 'Active' : 'Inactive'}</span>
-        <span className="text-xs text-nms-text-dim ml-auto">{radios.length} {radios.length === 1 ? deviceLabel : `${deviceLabel}s`} connected</span>
+        <Circle className={clsx('w-2 h-2', active === null ? 'text-nms-text-dim' : active ? 'fill-nms-green text-nms-green' : 'fill-nms-red text-nms-red')} />
+        <span className={clsx('text-sm font-medium', active ? 'text-nms-green' : 'text-nms-red')}>{active === null ? 'Observed — connectivity unknown' : active ? 'Active' : 'Inactive'}</span>
+        <span className="text-xs text-nms-text-dim ml-auto">{radios.length} {radios.length === 1 ? deviceLabel : `${deviceLabel}s`} {active === null ? 'observed' : 'connected'}</span>
       </div>
       <RadioList layout={layout} radios={radios} ues={ues} generation={generation} deviceLabel={deviceLabel}
         radioTags={radioTags} radioBands={radioBands} isAdmin={isAdmin} onTagSave={onTagSave} onBandSave={onBandSave}
@@ -1379,9 +1383,10 @@ function SectionHeader({ label, color }: { label: string; color: '4G' | '5G' }):
 
 export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
   const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
-  const interfaceStatus      = useTopologyStore(s => s.interfaceStatus);
-  const fetchInterfaceStatus = useTopologyStore(s => s.fetchInterfaceStatus);
+  const diagnostics = useNfDiagnostics();
+  const isAdmin = user?.role === 'admin' && legacyRanManagementAllowed(diagnostics.data);
+  const interfaceStatus = useMemo(() => diagnosticsInterfaceView(diagnostics.data), [diagnostics.data]);
+  const fetchInterfaceStatus = diagnostics.refresh;
 
   const [showIPTable, setShowIPTable] = useState(false);
   const [allConfigs, setAllConfigs]   = useState<any>(null);
@@ -1416,10 +1421,12 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
   }, []);
 
   useEffect(() => {
-    fetchInterfaceStatus(); loadTags(); loadConfigs(); loadBlocked(); loadBlockedGnbs(); loadBlockedUes();
-    const interval = setInterval(fetchInterfaceStatus, 30000);
-    return () => clearInterval(interval);
-  }, [fetchInterfaceStatus, loadTags, loadConfigs, loadBlocked, loadBlockedGnbs, loadBlockedUes]);
+    const policy = diagnostics.data?.legacyRanPolicy;
+    if (policy?.tags) loadTags();
+    if (policy?.configurationRead) loadConfigs();
+    if (policy?.radioEnforcement) { loadBlocked(); loadBlockedGnbs(); }
+    if (policy?.ueEnforcement) loadBlockedUes();
+  }, [diagnostics.data?.legacyRanPolicy?.tags, diagnostics.data?.legacyRanPolicy?.configurationRead, diagnostics.data?.legacyRanPolicy?.radioEnforcement, diagnostics.data?.legacyRanPolicy?.ueEnforcement, loadTags, loadConfigs, loadBlocked, loadBlockedGnbs, loadBlockedUes]);
 
   // Blocking severs S1-MME/S1-U (4G) or N2/N3 (5G) to the core from the NMS side (nftables),
   // without touching the radio itself — a real, live-impact action, so it's gated behind an
@@ -1536,7 +1543,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
   const s1uRadios   = withBlockedRadios((interfaceStatus?.s1u?.connectedEnodebs   || []) as ConnectedRadio[], blockedIps).filter(r => matchesFilter(r.ip));
   const n2Active    = interfaceStatus?.n2?.active                || false;
   const n2Radios    = withBlockedRadios((interfaceStatus?.n2?.connectedGnodebs || []) as ConnectedRadio[], blockedGnbIps).filter(r => matchesFilter(r.ip));
-  const n3Active    = interfaceStatus?.n3?.active                || false;
+  const n3Active    = interfaceStatus?.n3?.active ?? null;
   const n3Radios    = withBlockedRadios((interfaceStatus?.n3?.connectedGnodebs || []) as ConnectedRadio[], blockedGnbIps).filter(r => matchesFilter(r.ip));
   const activeUEs4G = (interfaceStatus?.activeUEs4G || []) as ActiveUE[];
   const activeUEs5G = (interfaceStatus?.activeUEs5G || []) as ActiveUE[];
@@ -1590,8 +1597,24 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
   const radioBlockProps = { blockedIps, onRequestBlock: setPendingBlockIp, onUnblock: handleUnblock };
   const gnbBlockProps = { blockedIps: blockedGnbIps, onRequestBlock: setPendingBlockGnbIp, onUnblock: handleUnblockGnb };
 
+  if (!diagnostics.data) return <div className="p-6 space-y-3" role="status">
+    <h1 className="text-2xl text-nms-text">RAN Network</h1>
+    <p>{diagnostics.error || 'Loading NF diagnostics…'}</p>
+    <button className="nms-btn" onClick={fetchInterfaceStatus}>Refresh</button>
+  </div>;
+  const snapshot = diagnostics.data;
+  const canRadios = diagnosticsPermitted(snapshot, 'radios');
+  const canUes = diagnosticsPermitted(snapshot, 'ues');
+  const canSessions = diagnosticsPermitted(snapshot, 'sessions');
+  if (!(canRadios && readable(snapshot.radios)) && !(canUes && readable(snapshot.ues)) && !(canSessions && readable(snapshot.sessions))) return <div className="p-6 space-y-3">
+    <h1 className="text-2xl text-nms-text">RAN Network</h1>
+    <DiagnosticsStatus data={snapshot} />
+    <button className="nms-btn" onClick={fetchInterfaceStatus}>Refresh</button>
+  </div>;
+
   return (
     <div className="px-4 pt-6 max-w-[1600px] mx-auto space-y-8">
+      <DiagnosticsStatus data={snapshot} />
 
       {showIPTable && allConfigs && (
         <IPPlumbingModal configs={allConfigs} onClose={() => setShowIPTable(false)} />
@@ -1601,7 +1624,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-bold font-display text-nms-text mb-1">RAN Network</h1>
-          <p className="text-sm text-nms-text-dim">Radio Access Network — interface status, connected radios, and active UE sessions</p>
+          <p className="text-sm text-nms-text-dim">Radio Access Network — observed radios, UEs and individual sessions</p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Radio list layout — applies to every S1-MME/S1-U/N2/N3 radio list below. */}
@@ -1649,28 +1672,37 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
       {/* 4G EPC */}
       <div>
         <SectionHeader label="4G EPC" color="4G" />
+        <ObservationStatus label="MME radios" observation={snapshot.services.mme.radios} />
+        {canRadios && readable(snapshot.services.mme.radios) && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <InterfaceCard icon={<Radio className="w-5 h-5" />} title="S1-MME Interface" subtitle="Control Plane (MME ↔ eNodeB)" active={s1mmeActive} radios={s1mmeRadios} deviceLabel="eNodeB" generation="4G" ues={activeUEs4G} {...sharedCardProps} {...radioBlockProps} />
-          <InterfaceCard icon={<Activity className="w-5 h-5" />} title="S1-U Interface" subtitle="User Plane (SGW-U ↔ eNodeB)" active={s1uActive} radios={s1uRadios} deviceLabel="eNodeB" generation="4G" ues={activeUEs4G} {...sharedCardProps} {...radioBlockProps} />
+          <InterfaceCard icon={<Activity className="w-5 h-5" />} title="S1-U Interface" subtitle="Inferred from MME radio associations" active={s1uActive} radios={s1uRadios} deviceLabel="eNodeB" generation="4G" ues={activeUEs4G} {...sharedCardProps} {...radioBlockProps} />
         </div>
+        )}
       </div>
 
       {/* 5G NR */}
       <div>
         <SectionHeader label="5G NR" color="5G" />
+        <ObservationStatus label="AMF radios" observation={snapshot.services.amf.radios} />
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {canRadios && readable(snapshot.services.amf.radios) &&
           <InterfaceCard icon={<Wifi className="w-5 h-5" />} title="N2 Interface" subtitle="Control Plane (AMF ↔ gNodeB)" active={n2Active} radios={n2Radios} deviceLabel="gNodeB" generation="5G" ues={activeUEs5G} {...sharedCardProps} {...gnbBlockProps} />
-          <InterfaceCard icon={<Network className="w-5 h-5" />} title="N3 Interface" subtitle="User Plane (UPF ↔ gNodeB)" active={n3Active} radios={n3Radios} deviceLabel="gNodeB" generation="5G" ues={activeUEs5G} {...sharedCardProps} {...gnbBlockProps} />
+          }
+          {canSessions && readable(snapshot.sessions) &&
+          <InterfaceCard icon={<Network className="w-5 h-5" />} title="N3 Interface" subtitle="Peers observed in SMF session records" active={n3Active} radios={n3Radios} deviceLabel="gNodeB" generation="5G" ues={activeUEs5G} {...sharedCardProps} {...gnbBlockProps} />
+          }
         </div>
       </div>
 
       {/* All Sessions */}
+      {((canUes && readable(snapshot.ues)) || (canSessions && readable(snapshot.sessions))) && (
       <div className="nms-card">
         <div className="flex items-center gap-3 mb-4">
           <div className="p-2 rounded-lg bg-nms-accent/10"><Users className="w-5 h-5 text-nms-accent" /></div>
           <div>
-            <h2 className="text-lg font-semibold font-display text-nms-text">All Active UE Sessions</h2>
-            <p className="text-xs text-nms-text-dim">Combined 4G + 5G session summary</p>
+            <h2 className="text-lg font-semibold font-display text-nms-text">UEs and Sessions</h2>
+            <p className="text-xs text-nms-text-dim">Observed 4G + 5G UEs, including those without an observed session</p>
           </div>
           <div className="ml-auto flex items-center gap-3">
             {isMetricsFallback && (
@@ -1678,7 +1710,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
             )}
             {activeUEs4G.length > 0 && <span className="text-xs font-medium text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded">{activeUEs4G.length} 4G</span>}
             {activeUEs5G.length > 0 && <span className="text-xs font-medium text-nms-accent bg-nms-accent/10 px-2 py-0.5 rounded">{activeUEs5G.length} 5G</span>}
-            <span className="text-sm font-semibold text-nms-accent">{allSessions.length} {allSessions.length === 1 ? 'session' : 'sessions'}</span>
+            <span className="text-sm font-semibold text-nms-accent">{allSessions.length} UE rows</span>
           </div>
         </div>
 
@@ -1713,7 +1745,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
                       {ue.metricsOnly ? <span className="text-xs text-nms-text-dim italic">metrics only</span> : (
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <button onClick={() => onNavigateToSubscriber?.(ue.imsi)} className="text-nms-accent hover:underline transition-colors">{ue.imsi}</button>
+                            <button disabled={!ue.imsi} onClick={() => onNavigateToSubscriber?.(ue.imsi)} className="text-nms-accent hover:underline transition-colors">{ue.imsi || ue.suci || 'Identity unavailable'}</button>
                             {isUeBlocked && (
                               <span className="flex items-center gap-1 text-[10px] font-bold text-nms-red bg-nms-red/10 border border-nms-red/30 px-1.5 py-0.5 rounded flex-shrink-0" title="Detached and blocked from this NMS — persists until unblocked">
                                 <UserX className="w-2.5 h-2.5" />UE BLOCKED
@@ -1751,7 +1783,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
                     </td>
                     <td className="px-3 py-2.5 text-nms-text font-mono text-xs">
                       <div className="flex flex-col gap-0.5">
-                        {ueSessions(ue).map((s, i) => <span key={i}>{s.apn || <span className="text-nms-text-dim">—</span>}</span>)}
+                        {ueSessions(ue).map((s, i) => <span key={i}>{s.apn || <span className="text-nms-text-dim">—</span>}{s.id ? ` (${s.id})` : ''}</span>)}
                       </div>
                     </td>
                     <td className="px-3 py-2.5 text-center">
@@ -1768,7 +1800,7 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
                     </td>
                     {isAdmin && (
                       <td className="px-3 py-2.5 text-right">
-                        {!ue.metricsOnly && (
+                        {!ue.metricsOnly && !!ue.imsi && (
                           isUeBlocked ? (
                             <button
                               onClick={() => handleUnblockUe(ue.imsi)}
@@ -1798,12 +1830,12 @@ export const RANPage: React.FC<RANPageProps> = ({ onNavigateToSubscriber }) => {
         ) : (
           <div className="text-center py-12 text-nms-text-dim">
             <Users className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p className="text-sm">No active UE sessions</p>
-            <p className="text-xs mt-1">Sessions appear here when UEs connect and establish PDN/PDU bearers</p>
-            <p className="text-xs mt-2 text-nms-text-dim/60">If UEs are connected, this feature requires Open5GS ≥ v2.7.7.</p>
+            <p className="text-sm">No matching UE rows in the available observations</p>
+            <p className="text-xs mt-1">Source coverage and collection failures are shown above.</p>
           </div>
         )}
       </div>
+      )}
 
       <ConfirmModal
         open={pendingBlockIp !== null}

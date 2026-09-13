@@ -133,3 +133,87 @@ The runtime-policy, service-runtime and kubernetes-service-runtime test suites
 cover local pass-through, guarded mixed workflows, topology without local config,
 WebSocket log rejection, absent Deployments, cluster errors, and retained local
 service operations. They use mocks and do not contact a cluster or systemd.
+
+## NF diagnostics boundary
+
+Authenticated `GET /api/diagnostics` now returns separate radio, UE and session
+observations, per-NF radio/UE coverage, target identity and diagnostics capabilities.
+`GET /api/diagnostics/capabilities` describes the target; optional `?nf=amf` (or
+another logical NF) describes that service's operations. Both are read-only.
+The three capability IDs are `diagnostics.radios.read`, `diagnostics.ues.read`, and
+`diagnostics.sessions.read`. Implementation support is separate from policy,
+access and availability: reads are allowed by provider policy, while access and
+availability remain unknown until an evidence mechanism is implemented. Capability
+discovery does not probe endpoints or infer availability from a healthy Deployment.
+
+`INfDiagnostics` is selected at the composition root. `LocalNfDiagnostics` uses
+the existing local Open5GS address resolution and host HTTP transport with strict
+HTTP-status and response validation. The existing `/api/interface-status` route
+and its local compatibility behavior remain intact for Dashboard, Topology, SNMP
+and other consumers. The Radios page uses the new diagnostics surface. Its new
+inventory includes registered UEs without sessions and preserves separate session
+records sharing an APN/DNN, including IPv6-only sessions. PSI/EBI identifiers are
+scoped to the source service and subscriber, not globally unique IDs. Missing
+identifiers remain missing. Optional nickname/radio-count enrichment cannot erase
+otherwise valid NF data and records its own provenance when used.
+
+An `ok` observation with `data: []` means a successful empty read. `partial` retains
+usable results with issues; `unsupported`, `unavailable`, `not-found` and the
+diagnostics-specific `error` state carry reasons and no data. Invalid JSON/schema
+is an error, not an empty inventory. The new diagnostics API never manufactures
+radio, UE or session records from Prometheus counts. S1-U presentation is explicitly
+inferred from MME radio associations; N3 peers are derived from SMF session records.
+
+`KubernetesNfDiagnostics` initially reports unsupported: no Kubernetes-accessible
+Open5GS diagnostics source has been verified. It has no host executor, local YAML,
+loopback, systemd, local log or metrics dependencies, and the factory does not
+construct the local provider in Kubernetes mode. Legacy indirect active-session
+reads also reject Kubernetes before accessing local sources. The Radios page shows
+the unsupported reason, not zero radios. No RBAC or cluster changes are needed.
+The existing coarse `coreDiagnostics` runtime flag continues to describe the legacy
+host diagnostics family; operation-specific discovery is on the diagnostics endpoint.
+
+This change does not alter Major Events, its historical radio picker, log history
+or following, raw downloads, debug bundles, ANSI processing, Docker runtime,
+lifecycle, configuration, or existing Kubernetes route guards.
+
+### Step 9 pre-acceptance corrections
+
+`ActiveSessionsUseCase` now delegates to `ILegacySessions`. Infrastructure selects
+`LocalLegacySessions` or an unsupported implementation without constructing the
+local provider. The extracted local method bodies match the accepted baseline;
+legacy DTO exports remain available. Radio-signal discover/poll/wake convert
+unsupported reads into HTTP 501 `RUNTIME_UNSUPPORTED`; other rejected handlers
+are forwarded to Express error handling.
+
+`LocalDiagnosticsHttp` owns the new strict curl/HTTP observation handling.
+Application `Open5gsApiClient` is restored to the accepted baseline, including its
+legacy behavior. The verified stock Open5GS 2.6.4 HTTP 400 `Bad Request` body is
+recognized as unsupported only for the four known NF info paths. Other HTTP 400
+responses remain failed/unavailable observations.
+
+Every diagnostics observation carries `targetId`, `requestedServices`,
+`observedAt` and scoped source provenance, even when empty, unsupported or failed.
+Aggregates retain all requested service identities. No endpoint or instance
+identity is fabricated when none was resolved. MME observations retain PDN/APN
+and EBI details independently of SMF; the UI preserves them when SMF fails and
+keeps individual PSI/EBI sessions. Optional enrichment failures remain partial
+observations and cannot remove otherwise valid UE information.
+
+N3 addresses from session records alone have unknown connectivity. When current
+N2 radio observations identify live peers, the existing correlation rule excludes
+contradictory peers from the N3 card, while raw session records remain available.
+Without that verification, the card displays observed/unknown rather than active.
+
+The response includes a narrow `legacyRanPolicy` for existing configuration-read,
+tag and radio/UE enforcement controls. The composition root derives it from the
+existing legacy runtime policy, separately from diagnostics capabilities. The UI
+uses these flags and the user role rather than comparing target names; diagnostics
+read support grants no management rights. Existing server-side guards are unchanged.
+
+Validation: 585 backend tests across 53 suites, all 27 frontend tests, backend
+TypeScript build, frontend TypeScript check, and 43 YAML/config checks passed.
+The final architecture review verified no Step 9 platform-name checks in
+application code or RAN presentation, no new application HTTP transport, and no
+local dependency in Kubernetes diagnostics. Kubernetes remains truthfully
+unsupported, with no HTTP implementation, new RBAC, or cluster changes.

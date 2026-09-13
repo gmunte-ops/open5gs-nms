@@ -1,3 +1,4 @@
+import { legacyDiagnosticsHandler } from './middleware/legacy-diagnostics-handler';
 import { Router, Request, Response } from 'express';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'crypto';
 import * as http from 'http';
@@ -280,7 +281,7 @@ export function createRadioSignalRouter(
     res.json({ success: true, id });
   });
 
-  router.post('/discover', requireAdmin, async (_req, res) => {
+  router.post('/discover', requireAdmin, legacyDiagnosticsHandler(async (_req, res) => {
     const [active, connectedRadios] = await Promise.all([
       activeSessions.getActive4GUEs(),
       activeSessions.getConnected4GRadios(),
@@ -306,7 +307,7 @@ export function createRadioSignalRouter(
       discovered.push({ ip, enbId: connectedRadios.find(r => r.ip === ip)?.enbId, radioId: id, imsis, added: !existing });
     }
     res.json({ discovered });
-  });
+  }));
 
   router.delete('/radios/:id', requireAdmin, (req, res) => {
     db.prepare('DELETE FROM signal_radios WHERE id = ?').run(req.params.id);
@@ -331,7 +332,7 @@ export function createRadioSignalRouter(
     res.json({ success: true, ingested: ues.length });
   });
 
-  router.post('/poll', requireAdmin, async (_req, res) => {
+  router.post('/poll', requireAdmin, legacyDiagnosticsHandler(async (_req, res) => {
     const radios = db.prepare('SELECT * FROM signal_radios WHERE enabled = 1').all() as RadioRow[];
     const activeByIp = new Map<string, string[]>();
     for (const ue of await activeSessions.getActive4GUEs()) {
@@ -361,9 +362,9 @@ export function createRadioSignalRouter(
     }));
     db.prepare('DELETE FROM signal_samples WHERE sampled_at < ?').run(Date.now() - 7 * 24 * 60 * 60 * 1000);
     res.json({ results });
-  });
+  }));
 
-  router.post('/wake', requireAdmin, async (req, res) => {
+  router.post('/wake', requireAdmin, legacyDiagnosticsHandler(async (req, res) => {
     const radioId = String(req.body?.radioId || '');
     const imsi = String(req.body?.imsi || '').replace(/\D/g, '');
     const radio = db.prepare('SELECT * FROM signal_radios WHERE id = ?').get(radioId) as RadioRow | undefined;
@@ -384,7 +385,7 @@ export function createRadioSignalRouter(
     }))));
     logger.info({ radioId, imsi: imsi || undefined, targets: sessions.length }, 'UE downlink wake packets sent');
     res.json({ success: true, targets: sessions.length, packets: sessions.length * ports.length });
-  });
+  }));
 
   // Read-only — this is the actual page's main data source (radio list +
   // per-UE signal data); see the comment on GET /radios above for why it
