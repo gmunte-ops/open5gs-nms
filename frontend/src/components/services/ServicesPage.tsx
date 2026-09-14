@@ -1,4 +1,5 @@
 import { useServiceCapabilities } from '../../hooks/useServiceCapabilities';
+import { serviceTargetGroups, serviceCapabilityLoad } from './service-target-view';
 import { actionView, bulkActionView, type CapabilityLoad, type CapabilityView } from './capability-view';
 import { ServiceCapabilities, CapabilityActionButton } from './ServiceCapabilities';
 import { useState, useEffect } from 'react';
@@ -222,7 +223,8 @@ interface SpeedTestStatus {
 interface SnmpServiceStatus { installed: boolean; active: boolean; enabled: boolean; port: number }
 
 export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => void }): JSX.Element {
-  const statuses = useServiceStore((s) => s.statuses);
+  const allStatuses = useServiceStore((s) => s.statuses);
+  const statuses = allStatuses.filter(s => !s.target);
   const fetchStatuses = useServiceStore((s) => s.fetchStatuses);
   const capabilities = useServiceCapabilities(statuses.map(s => s.name));
   const [bulkActing, setBulkActing] = useState(false);
@@ -384,31 +386,31 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
   const serviceRow = (s: ServiceStatus): ServiceRowData => {
     const { label, target } = serviceManageTarget(s.name);
     const readOnly = s.actionsSupported === false;
-    const load = capabilities.services[s.name] ?? { status: 'loading' as const };
+    const load = serviceCapabilityLoad(s, capabilities.services);
     const views = { start: actionView(load, 'start', s.actionsSupported), stop: actionView(load, 'stop', s.actionsSupported),
       restart: actionView(load, 'restart', s.actionsSupported), boot: actionView(load, s.enabled ? 'disable' : 'enable', s.actionsSupported) };
     return {
-      key: s.name,
+      key: s.target ? `${s.target.targetId}/${s.name}` : s.name,
       capabilities: load,
       actionsSupported: s.actionsSupported,
       actionViews: views,
       workload: s.kubernetes,
-      name: s.name.toUpperCase(),
+      name: s.displayName || s.name.toUpperCase(),
       unitName: s.unitName,
       badge: s.source ? { label: s.source, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' } : undefined,
-      subtitle: views.restart.disabled ? `${views.restart.label}: ${views.restart.reason}` : undefined,
+      subtitle: s.error || (views.restart.disabled ? `${views.restart.label}: ${views.restart.reason}` : undefined),
       active: s.active,
       stateLabel: `${s.state}/${s.subState}`,
-      enabled: s.enabled,
+      enabled: s.target ? undefined : s.enabled,
       onToggleEnabled: () => doServiceAction(s.name, s.enabled ? 'disable' : 'enable'),
       pid: s.pid,
       uptime: formatUptime(s.uptime),
       memoryBytes: s.memoryBytes,
       restartCount: s.restartCount,
       acting: !!actingByName[s.name],
-      onStart: () => doServiceAction(s.name, 'start'),
-      onStop: () => doServiceAction(s.name, 'stop'),
-      onRestart: () => doServiceAction(s.name, 'restart'),
+      onStart: s.target ? undefined : () => doServiceAction(s.name, 'start'),
+      onStop: s.target ? undefined : () => doServiceAction(s.name, 'stop'),
+      onRestart: s.target ? undefined : () => doServiceAction(s.name, 'restart'),
       manageLabel: label,
       onManage: readOnly ? undefined : () => onNavigate?.(target),
     };
@@ -580,10 +582,17 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
       {/* 5G Core */}
       {statuses.some(s => SERVICES_5G.includes(s.name)) && (
         <div>
-          <SectionHeader label="5G Core" color="text-blue-400" />
+          <SectionHeader label={`5G Core${statuses.find(s => SERVICES_5G.includes(s.name))?.providerLabel ? ` / ${statuses.find(s => SERVICES_5G.includes(s.name))!.providerLabel}` : ''}`} color="text-blue-400" />
           <ServiceTable rows={statuses.filter(s => SERVICES_5G.includes(s.name)).map(serviceRow)} />
         </div>
       )}
+
+      {serviceTargetGroups(allStatuses).map(group => (
+        <div key={group.key}>
+          <SectionHeader label={group.label} color="text-cyan-400" />
+          <ServiceTable rows={group.services.map(serviceRow)} />
+        </div>
+      ))}
 
       {/* 4G EPC */}
       {statuses.some(s => SERVICES_4G.includes(s.name)) && (

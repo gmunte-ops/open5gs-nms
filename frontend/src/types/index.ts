@@ -2,7 +2,12 @@
 export type ServiceName = 'nrf' | 'scp' | 'amf' | 'smf' | 'upf' | 'ausf' | 'udm' | 'udr' | 'pcf' | 'nssf' | 'bsf' | 'mme' | 'hss' | 'pcrf' | 'sgwc' | 'sgwu';
 
 export interface ServiceStatus {
-  name: ServiceName;
+  name: string;
+  target?: { targetId: string; group: string; label: string; serviceLabels: Record<string, string> };
+  displayName?: string;
+  providerLabel?: string;
+  capabilities?: import('./service-capabilities').ServiceCapability[];
+  observation?: { status: string; observedAt: string; reason?: string; sources: unknown[] };
   unitName: string;
   active: boolean;
   enabled: boolean;

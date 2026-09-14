@@ -91,8 +91,8 @@ export const SERVICE_RESTART_ORDER: ServiceName[] = [
   'mme',
 ];
 
-export interface ServiceStatus {
-  name: ServiceName;
+export interface ServiceStatus<TName extends string = ServiceName> {
+  name: TName;
   unitName: string;
   active: boolean;
   enabled: boolean;

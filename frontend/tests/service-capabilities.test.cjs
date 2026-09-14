@@ -55,6 +55,40 @@ function restartTag(markup) {
   return markup.match(/<button\b[^>]*aria-label="Restart:[^>]*>/)?.[0];
 }
 
+test('additional targets use metadata grouping and inline capabilities without changing primary actions', () => {
+  renderPage(load());
+  globalThis.servicesFixture.store.statuses.push({ name: 'pcscf', unitName: 'pcscf', displayName: 'P-CSCF',
+    target: { targetId: 'ims-docker', group: 'IMS', label: 'Docker · 192.168.1.192' },
+    active: true, state: 'running', subState: 'running', actionsSupported: false,
+    capabilities: load({ support: { status: 'unsupported' }, policy: { status: 'denied', reason: 'Read-only target' } }).data });
+  const html = renderToStaticMarkup(React.createElement(Page));
+  assert.match(html, /IMS \/ Docker · 192.168.1.192/);
+  assert.match(html, /P-CSCF/);
+  assert.match(html, /Read-only target/);
+  assert.doesNotMatch(restartTag(html), /disabled/);
+  const row = html.match(/<tr[^>]*>(?:(?!<\/tr>)[\s\S])*P-CSCF(?:(?!<\/tr>)[\s\S])*<\/tr>/)[0];
+  assert.doesNotMatch(row, /aria-label="(?:Restart|Start|Stop):/);
+  assert.doesNotMatch(row, /<button\b/);
+});
+
+test('additional target outage and failed capability assessment remain visible and read-only', () => {
+  const html = renderPage({ status: 'unavailable' }, { name: 'pcscf', displayName: 'P-CSCF',
+    target: { targetId: 'remote', group: 'IMS', label: 'Remote target' },
+    actionsSupported: false, active: false, state: 'unavailable', subState: 'unavailable', error: 'Remote observation unavailable' });
+  assert.match(html, /IMS \/ Remote target/);
+  assert.match(html, /Remote observation unavailable/);
+  assert.match(html, /unavailable\/unavailable/);
+  assert.equal(restartTag(html), undefined);
+});
+
+test('primary provider label and additional grouping are metadata-driven', () => {
+  const html = renderPage(load(), { name: 'amf', providerLabel: 'Kubernetes' });
+  assert.match(html, /5G Core \/ Kubernetes/);
+  const grouping = fs.readFileSync(path.join(root, 'src/components/services/service-target-view.ts'), 'utf8');
+  const page = fs.readFileSync(path.join(root, 'src/components/services/ServicesPage.tsx'), 'utf8');
+  assert.doesNotMatch(grouping + page, /(?:===|!==|==|!=)\s*['"](?:docker|kubernetes|systemd)['"]/);
+});
+
 test('local restart is shown available, normal state controls remain in force', () => {
   const html = renderPage(load());
   assert.match(restartTag(html), /Restart: Available/);

@@ -386,7 +386,12 @@ export interface SubscriberDto {
 
 // ── Service DTOs ──
 export interface ServiceStatusDto {
-  name: ServiceName;
+  name: string;
+  target?: import('../../domain/contracts/service-target').ServiceTargetMetadata;
+  displayName?: string;
+  providerLabel?: string;
+  capabilities?: readonly import('../../domain/contracts').CapabilityDescriptor[];
+  observation?: Pick<import('../../domain/contracts').Observation<unknown>, 'status' | 'observedAt' | 'sources' | 'reason'>;
   unitName: string;
   active: boolean;
   enabled: boolean;

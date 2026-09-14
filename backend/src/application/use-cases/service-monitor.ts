@@ -6,6 +6,7 @@ import { IWebSocketBroadcaster } from '../../domain/interfaces/websocket-broadca
 import { IAuditLogger } from '../../domain/interfaces/audit-logger';
 import { ServiceStatus, ServiceName } from '../../domain/entities/service-status';
 import { ServiceActionDto, ServiceStatusDto } from '../dto';
+import { ReadOnlyServiceTarget } from '../../domain/contracts/service-target';
 
 export class ServiceMonitorUseCase {
   private statusCache: Record<string, ServiceStatus> = {};
@@ -16,13 +17,33 @@ export class ServiceMonitorUseCase {
     private readonly wsBroadcaster: IWebSocketBroadcaster,
     private readonly auditLogger: IAuditLogger,
     private readonly logger: pino.Logger,
+    private readonly additionalTargets: readonly ReadOnlyServiceTarget[] = [],
+    private readonly providerLabel?: string,
   ) {}
 
   async getAll(): Promise<ServiceStatusDto[]> {
     const results: ServiceStatusDto[] = [];
     for (const ref of this.services.listServices()) {
       const status = await this.getServiceStatus(toLegacyServiceName(ref, this.services.targetId));
-      results.push(status);
+      results.push(this.providerLabel ? { ...status, providerLabel: this.providerLabel } : status);
+    }
+    for (const target of this.additionalTargets) {
+      const rows = await Promise.all(target.reader.listServices().map(async service => {
+        const observation = await target.reader.getStatus(service);
+        const capabilities = await target.reader.describe({ kind: 'service', service });
+        const status = observation.status === 'ok' || observation.status === 'partial' ? observation.data : {
+          name: service.nf, unitName: service.nf, active: false, enabled: false,
+          state: observation.status, subState: 'unavailable', error: observation.reason,
+          pid: null, uptime: null, restartCount: null, cpuPercent: null, memoryBytes: null, memoryPercent: null,
+          lastChecked: observation.observedAt,
+        };
+        return { ...status, actionsSupported: false, target: target.metadata,
+          displayName: target.metadata.serviceLabels[service.nf] || service.nf,
+          capabilities: capabilities.status === 'ok' || capabilities.status === 'partial' ? capabilities.data : undefined,
+          observation: { status: observation.status, observedAt: observation.observedAt, sources: observation.sources, reason: observation.reason },
+        };
+      }));
+      results.push(...rows);
     }
     return results;
   }

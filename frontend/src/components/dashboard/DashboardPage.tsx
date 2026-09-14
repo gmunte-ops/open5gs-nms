@@ -105,8 +105,8 @@ function ServiceMiniCard({ status }: { status: ServiceStatus }): JSX.Element {
       <div className="flex items-center gap-2 min-w-0">
         <div className={status.active ? 'status-dot-active' : 'status-dot-inactive'} />
         <div className="min-w-0">
-          <span className="text-xs font-medium truncate block">{status.name.toUpperCase()}</span>
-          <span className="text-[9px] text-nms-text-dim uppercase tracking-wide block">{vendorLabel(status.name)}</span>
+          <span className="text-xs font-medium truncate block">{status.displayName || status.name.toUpperCase()}</span>
+          <span className="text-[9px] text-nms-text-dim uppercase tracking-wide block">{status.target ? `${status.target.group} / ${status.target.label}` : vendorLabel(status.name)}</span>
         </div>
       </div>
       <span className={`text-xs shrink-0 ${status.active ? 'text-nms-green' : 'text-nms-red'}`}>
@@ -733,7 +733,7 @@ export function DashboardPage(): JSX.Element {
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-1.5">
           {statuses.length > 0 ? (
-            statuses.map((s) => <ServiceMiniCard key={s.name} status={s} />)
+            statuses.map((s) => <ServiceMiniCard key={s.target ? `${s.target.targetId}/${s.name}` : s.name} status={s} />)
           ) : (
             <div className="col-span-full text-center py-8 text-nms-text-dim text-sm">
               Loading service statuses...

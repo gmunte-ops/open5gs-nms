@@ -22,6 +22,7 @@ import { ValidateConfigUseCase } from './application/use-cases/validate-config';
 import { ApplyConfigUseCase } from './application/use-cases/apply-config';
 import { buildMmeDupReleaseAccessBearersPatchScript } from './application/use-cases/mme-dup-release-access-bearers-patch';
 import { ServiceMonitorUseCase } from './application/use-cases/service-monitor';
+import { additionalServiceTargets } from './infrastructure/runtime/additional-service-targets';
 import { SubscriberManagementUseCase } from './application/use-cases/subscriber-management';
 import { TopologyUseCase } from './application/use-cases/topology';
 import { BackupRestoreUseCase } from './application/use-cases/backup-restore';
@@ -181,6 +182,7 @@ async function main() {
       return new KubernetesServiceAdapter(runtime, new LocalServiceAdapter(hostExecutor, logger));
     });
   const serviceProvider = serviceProviders.create(config.open5gsRuntime);
+  const additionalTargets = additionalServiceTargets(process.env.NMS_RUNTIME_TARGETS, serviceProvider.targetId);
   const configRepo = new YamlConfigRepository(hostExecutor, config.configPath, logger);
   const subscriberRepo = new MongoSubscriberRepository(config.mongodbUri, logger);
   const rfPlanningProjectRepo = new MongoRfPlanningProjectRepository(config.mongodbUri, logger);
@@ -348,6 +350,8 @@ async function main() {
     wsBroadcaster,
     auditLogger,
     logger,
+    additionalTargets,
+    config.open5gsRuntime === 'kubernetes' ? 'Kubernetes' : undefined,
   );
   const tunUseCase = new TunManagementUseCase(hostExecutor, logger, configRepo);
   const subscriberManagementUseCase = new SubscriberManagementUseCase(
