@@ -1,11 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Editor from '@monaco-editor/react';
-import { useImsServiceInventory } from '../hooks/useImsServiceInventory';
-import { RuntimeImsView, selectImsServices } from '../components/ims/RuntimeImsView';
 import {
   CheckCircle, XCircle, RefreshCw,
   RotateCw, Settings, Users, Network, Power, BookOpen, ChevronDown,
-  Play, Square, Globe, Shield, Trash2, Plus, X,
+  Play, Square, Globe, Shield, Database, Terminal, Trash2, Plus, X,
   AlertTriangle, Pencil, Phone, Radio,
   Activity, FileText,
 } from 'lucide-react';
@@ -569,6 +567,58 @@ function ValidationCard() {
   );
 }
 
+// ── Install card ──────────────────────────────────────────────────────────────
+
+function InstallCard({
+  onDone, status, installing, setInstalling, setInstallLog,
+}: {
+  onDone: () => void;
+  status: ImsStatus | null;
+  installing: boolean;
+  setInstalling: (v: boolean) => void;
+  setInstallLog: (fn: (prev: string) => string) => void;
+}) {
+  const handleInstall = async () => {
+    setInstalling(true);
+    setInstallLog(() => '');
+    try {
+      const response = await imsApi.install();
+      if (!response.body) { setInstalling(false); return; }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        setInstallLog(prev => prev + decoder.decode(value));
+      }
+    } catch (err) {
+      setInstallLog(prev => prev + '\n❌ Install error: ' + String(err));
+    } finally {
+      setInstalling(false);
+      onDone();
+    }
+  };
+
+  const hssOnly = !!(status?.installed && !status?.pyhssInstalled);
+  const installTitle = hssOnly ? 'Install PyHSS' : 'Install IMS Software';
+  const installDesc = hssOnly
+    ? 'Kamailio is already installed. This will install redis-server + pip dependencies and clone PyHSS from source. Also checks whether the Open5GS SMF core-network bug fix (below) needs (re)building. Usually about a minute, longer if that build runs.'
+    : 'Installs: kamailio + IMS/MySQL/TLS modules, rtpengine, mariadb-server, bind9, redis-server, python3-pip via apt-get. Then clones PyHSS and installs pip dependencies. Also patches and rebuilds Open5GS SMF from source to fix a real core-network bug (skipped if already up to date) — this step alone can take several minutes the first time.';
+
+  return (
+    <div className="nms-card">
+      <div className="flex items-center gap-2 mb-3">
+        <Database className="w-4 h-4 text-nms-accent" />
+        <span className="text-sm font-semibold text-nms-text">{installTitle}</span>
+      </div>
+      <p className="text-xs text-nms-text-dim mb-3">{installDesc}</p>
+      <button onClick={handleInstall} disabled={installing} className="nms-btn w-full">
+        {installing ? 'Installing…' : installTitle}
+      </button>
+    </div>
+  );
+}
+
 // ── Config File Editor Tab ────────────────────────────────────────────────────
 
 function ConfigEditorTab() {
@@ -1100,23 +1150,12 @@ function LiveStatusTab() {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function IMSPage() {
-  const inventory = useImsServiceInventory();
-  if (inventory.error || !inventory.services) return (
-    <div className="p-6 space-y-3">
-      <h1 className="text-2xl font-semibold">IMS / VoLTE</h1>
-      <p role="status">{inventory.error || 'Loading IMS service inventory…'}</p>
-      <button className="nms-btn-ghost" onClick={inventory.refresh}>Refresh</button>
-    </div>
-  );
-  const services = selectImsServices(inventory.services);
-  return services.length ? <RuntimeImsView services={services} refresh={inventory.refresh} /> : <LegacyIMSPage />;
-}
-
-function LegacyIMSPage() {
   const [status,     setStatus]     = useState<ImsStatus | null>(null);
   const [loading,    setLoading]    = useState(true);
   const [acting,     setActing]     = useState(false);
   const [syncResult, setSyncResult] = useState<{ synced: number; failed: string[]; removed: number } | null>(null);
+  const [installLog,        setInstallLog]        = useState('');
+  const [installing,        setInstalling]        = useState(false);
   const [removeLog,         setRemoveLog]         = useState('');
   const [removing,          setRemoving]          = useState(false);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
@@ -1397,7 +1436,7 @@ function LegacyIMSPage() {
               </div>
               {!s.pyhssInstalled && (
                 <div className="mt-3 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-                  PyHSS is not available on this local IMS installation.
+                  PyHSS not yet installed — run Install to clone PyHSS and install dependencies.
                 </div>
               )}
               <div className="flex gap-4 mt-3 pt-3 border-t border-nms-border text-xs text-nms-text-dim">
@@ -1410,6 +1449,32 @@ function LegacyIMSPage() {
                 <span>{s.imsSubscribers} HSS subscribers</span>
                 <span>{s.open5gsSubscribers} Open5GS subscribers with MSISDN</span>
               </div>
+            </div>
+          )}
+
+          {s && (!s.installed || !s.pyhssInstalled) && (
+            <InstallCard
+              onDone={() => load(true)}
+              status={s}
+              installing={installing}
+              setInstalling={setInstalling}
+              setInstallLog={setInstallLog}
+            />
+          )}
+
+          {installLog && (
+            <div className="nms-card">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-nms-accent" />
+                  <span className="text-sm font-semibold text-nms-text">Install Log</span>
+                  {installing && <span className="text-xs text-amber-400 animate-pulse">running…</span>}
+                </div>
+                {!installing && (
+                  <button onClick={() => setInstallLog('')} className="nms-btn-ghost text-xs">Clear</button>
+                )}
+              </div>
+              <LogTerminal lines={installLog} />
             </div>
           )}
 
