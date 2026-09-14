@@ -1,5 +1,5 @@
 import { useServiceCapabilities } from '../../hooks/useServiceCapabilities';
-import { serviceTargetGroups, serviceCapabilityLoad } from './service-target-view';
+import { serviceTargetGroups, serviceCapabilityLoad, servicePresentationLabel } from './service-target-view';
 import { actionView, bulkActionView, type CapabilityLoad, type CapabilityView } from './capability-view';
 import { ServiceCapabilities, CapabilityActionButton } from './ServiceCapabilities';
 import { useState, useEffect } from 'react';
@@ -387,6 +387,7 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
     const { label, target } = serviceManageTarget(s.name);
     const readOnly = s.actionsSupported === false;
     const load = serviceCapabilityLoad(s, capabilities.services);
+    const sourceLabel = s.presentation ? servicePresentationLabel(s) : s.source;
     const views = { start: actionView(load, 'start', s.actionsSupported), stop: actionView(load, 'stop', s.actionsSupported),
       restart: actionView(load, 'restart', s.actionsSupported), boot: actionView(load, s.enabled ? 'disable' : 'enable', s.actionsSupported) };
     return {
@@ -397,7 +398,7 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (tab: string) => voi
       workload: s.kubernetes,
       name: s.displayName || s.name.toUpperCase(),
       unitName: s.unitName,
-      badge: s.source ? { label: s.source, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' } : undefined,
+      badge: sourceLabel ? { label: sourceLabel, color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' } : undefined,
       subtitle: s.error || (views.restart.disabled ? `${views.restart.label}: ${views.restart.reason}` : undefined),
       active: s.active,
       stateLabel: `${s.state}/${s.subState}`,

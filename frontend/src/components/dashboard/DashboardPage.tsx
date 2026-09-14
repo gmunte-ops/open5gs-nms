@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Activity, Users, Wifi, AlertTriangle, Play, Square, Zap, Clock, Radio, Shield, ShieldCheck, ShieldOff, Globe, PhoneCall, Phone, MessageSquare, Smartphone } from 'lucide-react';
 import { useServiceStore, useSubscriberStore } from '../../stores';
+import { hasSemanticService, imsServiceView } from './ims-service-view';
+import { servicePresentationLabel } from '../services/service-target-view';
 import { configApi, serviceApi, interfaceApi, radioBlockApi } from '../../api';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { sasApi } from '../../api/sas';
@@ -106,7 +108,7 @@ function ServiceMiniCard({ status }: { status: ServiceStatus }): JSX.Element {
         <div className={status.active ? 'status-dot-active' : 'status-dot-inactive'} />
         <div className="min-w-0">
           <span className="text-xs font-medium truncate block">{status.displayName || status.name.toUpperCase()}</span>
-          <span className="text-[9px] text-nms-text-dim uppercase tracking-wide block">{status.target ? `${status.target.group} / ${status.target.label}` : vendorLabel(status.name)}</span>
+          <span className="text-[9px] text-nms-text-dim uppercase tracking-wide block">{servicePresentationLabel(status) || vendorLabel(status.name)}</span>
         </div>
       </div>
       <span className={`text-xs shrink-0 ${status.active ? 'text-nms-green' : 'text-nms-red'}`}>
@@ -155,6 +157,7 @@ export function DashboardPage(): JSX.Element {
   const [sasBands, setSasBands] = useState<SasBand[] | null>(null);
   const [activeUes, setActiveUes] = useState<number | null>(null);
   const [imsStatus, setImsStatus] = useState<ImsStatus | null>(null);
+  const imsView = imsServiceView(statuses, imsStatus);
   const [imsCallStats, setImsCallStats] = useState<ImsCallStats | null>(null);
   const [vowifiStatus, setVowifiStatus] = useState<VowifiStatus | null>(null);
   const [vowifiStats, setVowifiStats] = useState<VectorcoreStats | null>(null);
@@ -527,29 +530,29 @@ export function DashboardPage(): JSX.Element {
                 "Total" here means "IKE SAs right now", which runs at or
                 above active_clients since it also counts in-progress/
                 half-open attempts). */}
-            <div className="grid grid-cols-2 divide-x divide-nms-border">
-              <div className="flex items-start justify-between p-4">
-                <div>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,14rem),1fr))]">
+              <div className="flex min-w-0 items-start justify-between gap-3 p-4">
+                <div className="min-w-0">
                   <p className="text-xs text-nms-text-dim uppercase tracking-wider">IMS Status</p>
                   <div className="flex items-center gap-2 mt-1">
                     <span className={`w-2.5 h-2.5 rounded-full inline-block ${
-                      !imsStatus ? 'bg-nms-text-dim/40' :
-                      imsStatus.imsEnabled ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.7)]' : 'bg-red-500'
+                      imsView.label === '…' ? 'bg-nms-text-dim/40' :
+                      imsView.active ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.7)]' : 'bg-red-500'
                     }`} />
                     <p className="text-2xl font-semibold font-display">
-                      {!imsStatus ? '…' : imsStatus.imsEnabled ? 'Active' : imsStatus.installed ? 'Stopped' : 'Not Installed'}
+                      {imsView.label}
                     </p>
                   </div>
                   <p className="text-xs text-nms-text-dim mt-1">
-                    {imsStatus?.ipsecSaCount ?? 0} IPsec SAs
+                    {imsView.semantic ? 'IPsec SAs unavailable' : `${imsStatus?.ipsecSaCount ?? 0} IPsec SAs`}
                   </p>
                 </div>
-                <div className="p-2.5 rounded-lg bg-nms-accent/10">
+                <div className="shrink-0 p-2.5 rounded-lg bg-nms-accent/10">
                   <PhoneCall className="w-5 h-5 text-nms-accent" />
                 </div>
               </div>
-              <div className="flex items-start justify-between p-4">
-                <div>
+              <div className="flex min-w-0 items-start justify-between gap-3 p-4">
+                <div className="min-w-0">
                   <p className="text-xs text-nms-text-dim uppercase tracking-wider">VoWiFi Status</p>
                   <div className="flex items-center gap-2 mt-1">
                     <span className={`w-2.5 h-2.5 rounded-full inline-block ${
@@ -564,11 +567,17 @@ export function DashboardPage(): JSX.Element {
                     Active <span className="ml-1 text-nms-accent">{vowifiStats?.active_ike_sas ?? 0} Total</span>
                   </p>
                 </div>
-                <div className="p-2.5 rounded-lg bg-nms-accent/10">
+                <div className="shrink-0 p-2.5 rounded-lg bg-nms-accent/10">
                   <Wifi className="w-5 h-5 text-nms-accent" />
                 </div>
               </div>
             </div>
+            {imsView.semantic ? (
+              <div className="p-4 text-xs text-nms-text-dim">
+                <p className="font-semibold">IMS measurements unavailable</p>
+                <p className="mt-1">Service observations do not provide registrations, active UEs, IPsec sessions, calls or message counts for this IMS target.</p>
+              </div>
+            ) : (<>
             {/* Registered vs Active UEs — split per subscriber count vs
                 real recent activity. "Registered" dedupes each UE's 3
                 IMPU bindings (tel:X/sip:X/sip:imsi@domain) down to one
@@ -641,6 +650,7 @@ export function DashboardPage(): JSX.Element {
                 </div>
               </div>
             </div>
+            </>)}
           </div>
 
         {/* UEs + GTP U-Plane Traffic + Time Server group — 3 short single-
@@ -739,9 +749,9 @@ export function DashboardPage(): JSX.Element {
               Loading service statuses...
             </div>
           )}
-          <AddonServiceMiniCard name="P-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.pcscf} loading={!imsStatus} />
-          <AddonServiceMiniCard name="I-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.icscf} loading={!imsStatus} />
-          <AddonServiceMiniCard name="S-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.scscf} loading={!imsStatus} />
+          {!hasSemanticService(statuses, 'pcscf') && <AddonServiceMiniCard name="P-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.pcscf} loading={!imsStatus} />}
+          {!hasSemanticService(statuses, 'icscf') && <AddonServiceMiniCard name="I-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.icscf} loading={!imsStatus} />}
+          {!hasSemanticService(statuses, 'scscf') && <AddonServiceMiniCard name="S-CSCF" vendor="Kamailio" active={!!imsStatus?.services?.scscf} loading={!imsStatus} />}
           <AddonServiceMiniCard name="ASTERISK" vendor="Asterisk" active={!!pstnStatus?.services?.asterisk} loading={!pstnStatus} />
           <AddonServiceMiniCard
             name="SECGW"

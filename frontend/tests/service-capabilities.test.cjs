@@ -89,6 +89,17 @@ test('primary provider label and additional grouping are metadata-driven', () =>
   assert.doesNotMatch(grouping + page, /(?:===|!==|==|!=)\s*['"](?:docker|kubernetes|systemd)['"]/);
 });
 
+test('Services rows render optional placement without changing source-only badges', () => {
+  const html = renderPage(load(), { name: 'amf', actionsSupported: false,
+    presentation: { domain: '5G Core', platform: 'Kubernetes', hostAddress: '192.0.2.25' } });
+  assert.match(html, /5G Core \/ Kubernetes · 192.0.2.25/);
+  const unresolved = renderPage(load(), { presentation: { domain: '5G Core', platform: 'Kubernetes' } });
+  assert.match(unresolved, /5G Core \/ Kubernetes/);
+  assert.doesNotMatch(unresolved, /Kubernetes ·/);
+  const existing = renderPage(load(), { source: 'docker', target: { targetId: 'ims', group: 'IMS', label: 'Docker · 192.168.1.192' }, actionsSupported: false });
+  assert.match(existing, />docker<\/span>/);
+});
+
 test('local restart is shown available, normal state controls remain in force', () => {
   const html = renderPage(load());
   assert.match(restartTag(html), /Restart: Available/);

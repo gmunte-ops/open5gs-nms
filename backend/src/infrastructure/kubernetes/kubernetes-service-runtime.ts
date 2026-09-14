@@ -4,6 +4,7 @@ import pino from 'pino';
 import { IServiceRuntime } from '../../domain/interfaces/service-runtime';
 import { ServiceName, ServiceStatus } from '../../domain/entities/service-status';
 import { KubernetesWorkloadResolver } from './kubernetes-workload-resolver';
+import { kubernetesServicePresentation } from './kubernetes-service-presentation';
 
 export const DEPLOYMENT_MAP: Partial<Record<ServiceName, string>> = {
   mongodb: 'open5gs-mongodb',
@@ -30,6 +31,7 @@ export const DEPLOYMENT_MAP: Partial<Record<ServiceName, string>> = {
 
 export class KubernetesServiceRuntime implements IServiceRuntime {
   private readonly appsApi: k8s.AppsV1Api;
+  private readonly coreApi: k8s.CoreV1Api;
   private readonly workloadResolver: KubernetesWorkloadResolver;
 
   constructor(
@@ -40,7 +42,8 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
     const kc = new k8s.KubeConfig();
     kc.loadFromFile(kubeconfigPath);
     this.appsApi = kc.makeApiClient(k8s.AppsV1Api);
-    this.workloadResolver = new KubernetesWorkloadResolver(this.appsApi, kc.makeApiClient(k8s.CoreV1Api), this.namespace);
+    this.coreApi = kc.makeApiClient(k8s.CoreV1Api);
+    this.workloadResolver = new KubernetesWorkloadResolver(this.appsApi, this.coreApi, this.namespace);
   }
 
   handles(service: ServiceName): boolean {
@@ -84,6 +87,7 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
       }
 
       const workload = await this.workloadResolver.resolve(deployment);
+      const presentation = await kubernetesServicePresentation(this.coreApi, workload);
       const restartCount = workload.status === 'available' && workload.pods.every(pod => pod.restartCount !== null)
         ? workload.pods.reduce((sum, pod) => sum + pod.restartCount!, 0) : null;
 
@@ -103,6 +107,7 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
         lastChecked: new Date().toISOString(),
         source: 'kubernetes',
         kubernetes: workload,
+        presentation,
       };
     } catch (err: any) {
       const statusCode =
@@ -118,6 +123,7 @@ export class KubernetesServiceRuntime implements IServiceRuntime {
           active: false,
           enabled: false,
           state: 'not-deployed',
+          presentation: { domain: '5G Core', platform: 'Kubernetes' },
           subState: 'absent',
           pid: null,
           uptime: null,

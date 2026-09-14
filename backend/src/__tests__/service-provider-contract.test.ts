@@ -100,7 +100,9 @@ test('absent Deployment remains owned, absent and read-only with no local fallba
 test.each([new Error('Forbidden'), { code: 403 }, { code: 500 }])('API failure retains exact legacy unavailable response and never probes host: %j', async error => {
   mockReadDeployment.mockRejectedValue(error);
   const { monitor, host } = fixture('kubernetes');
-  expect(await monitor.getOne('mme')).toEqual({ name: 'mme', unitName: 'mme', active: false, enabled: false, state: 'unknown', subState: 'unavailable', pid: null, uptime: null, restartCount: null, cpuPercent: null, memoryBytes: null, memoryPercent: null, lastChecked: '2026-01-01T00:00:00.000Z', source: 'kubernetes', actionsSupported: false, error: error instanceof Error ? error.message : String(error) });
+  const { presentation, ...legacyStatus } = await monitor.getOne('mme');
+  expect(presentation).toEqual({ domain: '5G Core', platform: 'Kubernetes' });
+  expect(legacyStatus).toEqual({ name: 'mme', unitName: 'mme', active: false, enabled: false, state: 'unknown', subState: 'unavailable', pid: null, uptime: null, restartCount: null, cpuPercent: null, memoryBytes: null, memoryPercent: null, lastChecked: '2026-01-01T00:00:00.000Z', source: 'kubernetes', actionsSupported: false, error: error instanceof Error ? error.message : String(error) });
   expect(host.executeCommand).not.toHaveBeenCalled();
   expect(host.executeLocalCommand).not.toHaveBeenCalled();
 });

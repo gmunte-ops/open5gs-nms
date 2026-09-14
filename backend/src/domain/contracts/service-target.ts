@@ -3,6 +3,15 @@ import type { IServiceStatusReader } from './service-operations';
 import type { TargetId } from './target';
 import type { ServiceStatus } from '../entities/service-status';
 
+/** Optional per-service placement; never implies lifecycle ownership. */
+export interface ServicePresentation {
+  readonly domain: string;
+  readonly platform: string;
+  readonly hostAddress?: string;
+  readonly hostName?: string;
+  readonly instanceId?: string;
+}
+
 /** Presentation metadata is supplied by composition, independent of NMS hosting. */
 export interface ServiceTargetMetadata {
   readonly targetId: TargetId;

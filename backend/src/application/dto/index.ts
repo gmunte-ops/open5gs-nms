@@ -386,6 +386,7 @@ export interface SubscriberDto {
 
 // ── Service DTOs ──
 export interface ServiceStatusDto {
+  presentation?: import('../../domain/contracts/service-target').ServicePresentation;
   name: string;
   target?: import('../../domain/contracts/service-target').ServiceTargetMetadata;
   displayName?: string;

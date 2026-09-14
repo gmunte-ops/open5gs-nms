@@ -1,6 +1,12 @@
 import type { ServiceStatus } from '../../types';
 import type { CapabilityLoad } from './capability-view';
 
+export function servicePresentationLabel(service: ServiceStatus): string | undefined {
+  const placement = service.presentation;
+  if (placement) return `${placement.domain} / ${placement.platform}${placement.hostAddress ? ` · ${placement.hostAddress}` : ''}`;
+  return service.target ? `${service.target.group} / ${service.target.label}` : undefined;
+}
+
 /** Metadata routes presentation; it never selects a platform or grants control. */
 export function serviceTargetGroups(statuses: readonly ServiceStatus[]) {
   const groups = new Map<string, { key: string; label: string; services: ServiceStatus[] }>();

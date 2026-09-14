@@ -2,6 +2,7 @@
 export type ServiceName = 'nrf' | 'scp' | 'amf' | 'smf' | 'upf' | 'ausf' | 'udm' | 'udr' | 'pcf' | 'nssf' | 'bsf' | 'mme' | 'hss' | 'pcrf' | 'sgwc' | 'sgwu';
 
 export interface ServiceStatus {
+  presentation?: { domain: string; platform: string; hostAddress?: string; hostName?: string; instanceId?: string };
   name: string;
   target?: { targetId: string; group: string; label: string; serviceLabels: Record<string, string> };
   displayName?: string;

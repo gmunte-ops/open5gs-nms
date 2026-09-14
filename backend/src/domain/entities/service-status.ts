@@ -92,6 +92,7 @@ export const SERVICE_RESTART_ORDER: ServiceName[] = [
 ];
 
 export interface ServiceStatus<TName extends string = ServiceName> {
+  presentation?: import('../contracts/service-target').ServicePresentation;
   name: TName;
   unitName: string;
   active: boolean;

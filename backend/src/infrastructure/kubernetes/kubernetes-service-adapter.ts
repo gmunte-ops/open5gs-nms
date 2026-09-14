@@ -73,6 +73,7 @@ export class KubernetesServiceAdapter implements IServiceStatusReader<ServiceSta
         pid: null, uptime: null, restartCount: null, cpuPercent: null,
         memoryBytes: null, memoryPercent: null, lastChecked: new Date().toISOString(),
         source: 'kubernetes', actionsSupported: false,
+        presentation: { domain: '5G Core', platform: 'Kubernetes' },
         error: err instanceof Error ? err.message : String(err),
       };
     }
